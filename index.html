@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="SPORT17, ropa deportiva urbana, moderna y premium para hombre y mujer. Comprá fácil desde WhatsApp."
+    />
+    <title>SPORT17 | Ropa deportiva urbana</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./main.js"></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="#inicio" aria-label="SPORT17 inicio">
+          <img src="./logo2.0.png" alt="Logo SPORT17" class="brand-logo" />
+          <div class="brand-copy">
+            <span class="brand-kicker">SPORT17</span>
+            <span class="brand-subtitle">Ropa deportiva urbana</span>
+          </div>
+        </a>
+
+        <button class="menu-button" type="button" aria-label="Abrir menú" aria-expanded="false" aria-controls="nav">
+          <span></span>
+          <span></span>
+          <span></span>
+        </button>
+
+        <nav id="nav" class="site-nav">
+          <a href="#inicio">Inicio</a>
+          <a href="#colecciones">Colecciones</a>
+        </nav>
+
+        <a
+          class="whatsapp-pill"
+          href="https://wa.me/5491136634655?text=Hola%20SPORT17%2C%20quiero%20ver%20la%20colecci%C3%B3n"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Comprar por WhatsApp
+        </a>
+      </div>
+    </header>
+
+    <main id="inicio">
+      <section class="hero-full-width">
+        <div class="hero-carousel" data-carousel>
+          <div class="hero-carousel-track">
+            <article class="hero-slide is-active" data-slide="0">
+              <img src="./hero.png" alt="Hero Slide 1" class="hero-slide-image" />
+            </article>
+
+            <article class="hero-slide" data-slide="1">
+              <img src="./hero2.png" alt="Hero Slide 2" class="hero-slide-image" />
+            </article>
+
+            <article class="hero-slide" data-slide="2">
+              <img src="./hero3.png" alt="Hero Slide 3" class="hero-slide-image" />
+            </article>
+          </div>
+
+          <button class="carousel-button carousel-button-prev" type="button" aria-label="Anterior">
+            <span>‹</span>
+          </button>
+          <button class="carousel-button carousel-button-next" type="button" aria-label="Siguiente">
+            <span>›</span>
+          </button>
+
+          <div class="carousel-dots" aria-label="Slides del carrusel">
+            <button class="carousel-dot is-active" type="button" data-go="0" aria-label="Ir al slide 1"></button>
+            <button class="carousel-dot" type="button" data-go="1" aria-label="Ir al slide 2"></button>
+            <button class="carousel-dot" type="button" data-go="2" aria-label="Ir al slide 3"></button>
+          </div>
+        </div>
+      </section>
+
+      <section class="section category-landing" id="colecciones">
+        <div class="category-selection-grid">
+          <div class="category-selection-card" data-collection="hombres">
+            <img src="./men.png" alt="Hombres" />
+            <div class="category-overlay">
+              <h2>HOMBRES</h2>
+            </div>
+          </div>
+          <div class="category-selection-card" data-collection="mujeres">
+            <img src="./women.png" alt="Mujeres" />
+            <div class="category-overlay">
+              <h2>MUJERES</h2>
+            </div>
+          </div>
+        </div>
+
+        <div id="collection-container" class="collection-stage" style="display: none; margin-top: 50px;">
+          <div class="collection-products" id="hombres-grid" data-panel="hombres" style="display: none;"></div>
+          <div class="collection-products" id="mujeres-grid" data-panel="mujeres" style="display: none;"></div>
+        </div>
+      </section>
+
+      <!-- Lightbox Modal -->
+      <div id="lightbox" class="lightbox">
+        <span class="lightbox-close">&times;</span>
+        <img class="lightbox-content" id="lightbox-img" />
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <img src="./logo2.0.png" alt="Logo SPORT17" class="footer-logo" loading="lazy" decoding="async" />
+          <p>
+            🔹️𝗜𝗻𝗱𝘂𝗺𝗲𝗻𝘁𝗮𝗿𝗶𝗮 𝗜𝗺𝗽𝗼𝗿𝘁𝗮𝗱𝗮<br>
+            🔹️Envíos a todo el país ✈️<br>
+            🔹️Todos los medios de pago 💳💵
+          </p>
+          <a
+            class="footer-cta"
+            href="https://wa.me/5491136634655?text=Hola%20SPORT17%2C%20quiero%20ver%20la%20colecci%C3%B3n"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Comprar por WhatsApp
+          </a>
+        </div>
+
+        <div>
+          <h3>Links rápidos</h3>
+          <ul>
+            <li><a href="#colecciones">Colecciones</a></li>
+          </ul>
+        </div>
+
+        <div>
+          <h3>Redes</h3>
+          <ul>
+            <li><a href="https://www.instagram.com/nyfsport17/" target="_blank" rel="noreferrer">Instagram</a></li>
+            <li><a href="https://www.tiktok.com/@sport17____" target="_blank" rel="noreferrer">TikTok</a></li>
+            <li><a href="https://wa.me/5491136634655?text=Hola%20SPORT17%2C%20quiero%20ver%20la%20colecci%C3%B3n" target="_blank" rel="noreferrer">WhatsApp</a></li>
+            <li><a href="#colecciones">Catálogo</a></li>
+          </ul>
+        </div>
+
+        <div>
+          <h3>Contacto</h3>
+          <ul>
+            <li><a href="https://wa.me/5491136634655" target="_blank" rel="noreferrer">+54 9 11 3663-4655</a></li>
+            <li>Envíos a todo el país</li>
+          </ul>
+        </div>
+      </div>
+
+    </footer>
+  </body>
+</html>
