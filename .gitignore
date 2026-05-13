@@ -1,0 +1,5 @@
+.claude/
+.firebase/
+*.xlsx
+*.pdf
+memory.md
