@@ -1,5 +1,7 @@
 .claude/
 .firebase/
+node_modules/
 *.xlsx
 *.pdf
 memory.md
+admin/firebase-config.local.js

@@ -1600,3 +1600,55 @@ h1 {
 .lightbox-close:hover {
   color: #ccc;
 }
+
+/* ─── Stock badge sobre la imagen del producto ─── */
+.product-single-media,
+.product-gallery {
+  position: relative;
+}
+.product-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  z-index: 2;
+  pointer-events: none;
+}
+.product-badge-out {
+  background: rgba(220, 38, 38, 0.95);
+  color: white;
+}
+.product-card.is-out-of-stock img {
+  filter: grayscale(0.4) opacity(0.85);
+}
+
+/* ─── Sección Destacados (productos featured desde admin) ─── */
+.featured-section {
+  padding: 50px 20px 30px;
+  background: linear-gradient(180deg, rgba(47, 124, 255, 0.04) 0%, transparent 100%);
+}
+.featured-rail {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  padding: 8px 4px 20px;
+  -webkit-overflow-scrolling: touch;
+}
+.featured-rail .product-card {
+  flex: 0 0 240px;
+  scroll-snap-align: start;
+}
+@media (min-width: 900px) {
+  .featured-rail .product-card {
+    flex: 0 0 260px;
+  }
+}
+.featured-rail::-webkit-scrollbar { height: 8px; }
+.featured-rail::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 4px; }
+

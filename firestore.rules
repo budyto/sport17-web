@@ -1,0 +1,38 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Lectura pública: la web sport17.com.ar lista productos y categorías.
+    // Escritura: solo administradores autenticados (lista en /admin/firebase-config.js).
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email in [
+          'admin@sport17.com.ar'
+        ];
+    }
+
+    // Productos: público lee, admin escribe
+    match /products/{productId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Categorías: público lee, admin escribe
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Configuración global de la tienda (textos del hero, redes, etc.)
+    match /settings/{document=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Logs / actividad (solo admin)
+    match /activity/{document=**} {
+      allow read, write: if isAdmin();
+    }
+  }
+}

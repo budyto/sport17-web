@@ -6,10 +6,14 @@
       ".firebaserc",
       ".claude",
       "memory.md",
+      "README-ADMIN.md",
       "catalogo_sport17.xlsx",
       "Cv-Rocío Aquino.pdf",
       "iagen",
-      "node_modules"
+      "node_modules",
+      "firestore.rules",
+      "storage.rules",
+      "firestore.indexes.json"
     ],
     "headers": [
       {
@@ -25,12 +29,32 @@
         "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400" }]
       },
       {
+        "source": "/admin/**/*.js",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-store, must-revalidate" },
+          { "key": "X-Robots-Tag", "value": "noindex, nofollow" }
+        ]
+      },
+      {
+        "source": "/admin/**",
+        "headers": [{ "key": "X-Robots-Tag", "value": "noindex, nofollow" }]
+      },
+      {
         "source": "**/*.js",
         "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400" }]
       }
     ],
     "rewrites": [
+      { "source": "/admin", "destination": "/admin/index.html" },
+      { "source": "/admin/", "destination": "/admin/index.html" },
       { "source": "**", "destination": "/index.html" }
     ]
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "storage": {
+    "rules": "storage.rules"
   }
 }
