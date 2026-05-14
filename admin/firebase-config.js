@@ -8,12 +8,13 @@
 // agregá una nueva app web. Después copiá los valores acá.
 
 export const firebaseConfig = {
-  apiKey: "REEMPLAZAR_API_KEY",
+  apiKey: "AIzaSyBvosCirfoJsFrwMN1rL9znnvqTo17pgsg",
   authDomain: "sport17-a01f6.firebaseapp.com",
   projectId: "sport17-a01f6",
-  storageBucket: "sport17-a01f6.appspot.com",
-  messagingSenderId: "REEMPLAZAR_SENDER_ID",
-  appId: "REEMPLAZAR_APP_ID",
+  storageBucket: "sport17-a01f6.firebasestorage.app",
+  messagingSenderId: "852706956019",
+  appId: "1:852706956019:web:5b36c8daa67fb882cc5d86",
+  measurementId: "G-WSWVS5C2LM",
 };
 
 // Lista blanca de emails admin. Cualquier usuario que no esté acá no puede

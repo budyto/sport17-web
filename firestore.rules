@@ -34,5 +34,10 @@ service cloud.firestore {
     match /activity/{document=**} {
       allow read, write: if isAdmin();
     }
+
+    // Historial de imports (snapshots para deshacer). Solo admin.
+    match /import-history/{document=**} {
+      allow read, write: if isAdmin();
+    }
   }
 }

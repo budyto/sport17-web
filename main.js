@@ -219,8 +219,8 @@ function renderFeatured() {
 
   featSection.innerHTML = `
     <div class="section-intro">
-      <h2 class="section-intro-title">Destacados</h2>
-      <p class="section-intro-text">Los favoritos del momento. Una selección curada de lo más buscado.</p>
+      <h2 class="section-intro-title">Los más pedidos</h2>
+      <p class="section-intro-text">Lo que más se mueve en SPORT17 esta temporada. Stock limitado y reposición constante: si te gusta uno, consultalo por WhatsApp antes de que vuele.</p>
     </div>
     <div class="product-rail featured-rail">${featuredProducts.map(renderItem).join("")}</div>
   `;

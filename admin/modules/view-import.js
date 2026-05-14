@@ -5,15 +5,18 @@
 //   - estructura preparada para sincronización con Google Sheets
 
 import * as XLSX from "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm";
-import { fetchProducts, fetchCategories, bulkUpdateProducts, createProduct, updateProduct } from "./data.js";
-import { escapeHtml, $ } from "./helpers.js";
-import { toast, loadingState } from "./ui.js";
+import {
+  fetchProducts, fetchCategories, bulkUpdateProducts, createProduct, updateProduct,
+  saveImportSnapshot, fetchImportHistory, deleteImportSnapshot, rollbackImport,
+} from "./data.js";
+import { escapeHtml, $, formatDateTime } from "./helpers.js";
+import { toast, loadingState, confirmDialog } from "./ui.js";
+import { getCurrentUser } from "./auth.js";
 
 export async function renderImport(outlet) {
   outlet.innerHTML = loadingState();
   const [products, categories] = await Promise.all([fetchProducts(), fetchCategories()]);
-  const catName = (id) => categories.find((c) => c.id === id)?.name || "";
-  const catByName = (name) => categories.find((c) => c.name.toLowerCase() === String(name || "").toLowerCase());
+  const catById = (id) => categories.find((c) => c.id === id);
 
   outlet.innerHTML = `
     <div class="page-head">
@@ -75,8 +78,8 @@ export async function renderImport(outlet) {
   `;
 
   // ── Export
-  $("#export-xlsx").onclick = () => exportFile(products, catName, "xlsx");
-  $("#export-csv").onclick = () => exportFile(products, catName, "csv");
+  $("#export-xlsx").onclick = () => exportFile(products, catById, "xlsx");
+  $("#export-csv").onclick = () => exportFile(products, catById, "csv");
 
   // ── Import
   const uploader = $("#xls-uploader");
@@ -92,9 +95,9 @@ export async function renderImport(outlet) {
     try {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: "array" });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
-      previewAndImport(rows);
+      const sheet = pickCatalogSheet(wb);
+      const rows = extractRows(sheet);
+      previewAndImport(rows, { source: "excel", fileName: file.name });
     } catch (err) {
       toast("No pude leer el archivo: " + err.message, "error");
     }
@@ -108,25 +111,42 @@ export async function renderImport(outlet) {
       const res = await fetch(url);
       const csv = await res.text();
       const wb = XLSX.read(csv, { type: "string" });
-      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
-      previewAndImport(rows);
+      const rows = extractRows(wb.Sheets[wb.SheetNames[0]]);
+      previewAndImport(rows, { source: "sheets", fileName: "Google Sheets" });
     } catch (err) {
       toast("No pude traer la hoja: " + err.message, "error");
     }
   };
 
-  function previewAndImport(rows) {
+  function previewAndImport(rows, meta) {
     if (!rows.length) { toast("El archivo no tiene filas", "error"); return; }
     const preview = $("#xls-preview");
     const cols = Object.keys(rows[0]);
 
     const toCreate = [];
     const toUpdate = [];
+    const skipped = [];
     for (const r of rows) {
-      const id = String(r.id || r.ID || "").trim();
-      const parsed = parseRow(r, catByName);
-      if (id && products.some((p) => p.id === id)) toUpdate.push({ id, fields: parsed });
-      else toCreate.push(parsed);
+      const parsed = parseRow(r, categories);
+      if (!parsed) { skipped.push(r); continue; }
+      const { id, sku, fields } = parsed;
+
+      // Estrategia de match:
+      //  1) id de Firestore explícito
+      //  2) sku (ej. "P001") guardado previamente en el producto
+      //  3) nombre exacto + misma categoría (fallback útil tras el seed)
+      let existing = null;
+      if (id) existing = products.find((p) => p.id === id);
+      if (!existing && sku) existing = products.find((p) => (p.sku || "").toLowerCase() === sku.toLowerCase());
+      if (!existing && fields.name) {
+        existing = products.find((p) =>
+          (p.name || "").trim().toLowerCase() === fields.name.trim().toLowerCase()
+          && (!fields.categoryId || p.categoryId === fields.categoryId)
+        );
+      }
+
+      if (existing) toUpdate.push({ id: existing.id, fields });
+      else toCreate.push(fields);
     }
 
     preview.innerHTML = `
@@ -134,7 +154,7 @@ export async function renderImport(outlet) {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
         <div>
           <strong>Vista previa</strong>
-          <div>Se van a actualizar <strong>${toUpdate.length}</strong> producto${toUpdate.length === 1 ? "" : "s"} y crear <strong>${toCreate.length}</strong> nuevo${toCreate.length === 1 ? "" : "s"}.</div>
+          <div>Se van a actualizar <strong>${toUpdate.length}</strong> producto${toUpdate.length === 1 ? "" : "s"} y crear <strong>${toCreate.length}</strong> nuevo${toCreate.length === 1 ? "" : "s"}.${skipped.length ? ` Se saltean <strong>${skipped.length}</strong> fila${skipped.length === 1 ? "" : "s"} sin nombre.` : ""}</div>
           <div style="font-size:12px; color: var(--text-soft); margin-top:6px;">Columnas detectadas: ${cols.map(escapeHtml).join(", ")}</div>
         </div>
       </div>
@@ -144,60 +164,279 @@ export async function renderImport(outlet) {
     $("#cancel-import").onclick = () => preview.innerHTML = "";
     $("#confirm-import").onclick = async () => {
       $("#confirm-import").disabled = true;
+      $("#confirm-import").innerHTML = `<span class="spinner"></span> Aplicando...`;
       try {
+        // 1. Capturar snapshot del estado anterior — solo de los productos que se van a tocar.
+        const snapshotUpdated = toUpdate.map(({ id, fields }) => {
+          const current = products.find((p) => p.id === id) || {};
+          const before = {};
+          for (const k of Object.keys(fields)) before[k] = current[k] ?? null;
+          // capturamos también los campos críticos por las dudas
+          ["name", "description", "price", "priceOld", "cost", "stock", "categoryId", "sizes", "colors", "active", "featured", "sku", "images"].forEach((k) => {
+            if (!(k in before)) before[k] = current[k] ?? null;
+          });
+          return { id, before };
+        });
+
+        // 2. Aplicar updates + creates, recolectando IDs creados.
         if (toUpdate.length) await bulkUpdateProducts(toUpdate);
-        for (const data of toCreate) await createProduct(data);
-        toast(`Listo: ${toUpdate.length} actualizado${toUpdate.length === 1 ? "" : "s"}, ${toCreate.length} creado${toCreate.length === 1 ? "" : "s"}.`);
+        const createdIds = [];
+        for (const data of toCreate) {
+          const newId = await createProduct(data);
+          createdIds.push(newId);
+        }
+
+        // 3. Guardar snapshot para poder deshacer.
+        const user = getCurrentUser();
+        await saveImportSnapshot({
+          source: meta?.source || "manual",
+          fileName: meta?.fileName || "",
+          userEmail: user?.email || "",
+          updated: snapshotUpdated,
+          created: createdIds,
+          stats: { updated: toUpdate.length, created: toCreate.length, skipped: skipped.length },
+        });
+
+        toast(`Listo: ${toUpdate.length} actualizado${toUpdate.length === 1 ? "" : "s"}, ${toCreate.length} creado${toCreate.length === 1 ? "" : "s"}. Podés deshacer desde abajo.`);
         preview.innerHTML = "";
         renderImport(outlet);
       } catch (err) {
         toast("Error al aplicar: " + err.message, "error");
         $("#confirm-import").disabled = false;
+        $("#confirm-import").textContent = "Aplicar cambios";
       }
     };
   }
+
+  // ═══ Historial de imports (con deshacer) ═══
+  await renderHistory(outlet);
 }
 
-function parseRow(r, catByName) {
-  // Normalizamos nombres de columna: minúsculas, sin espacios, sin acentos.
+async function renderHistory(outlet) {
+  // Insertamos la card de historial al final del outlet
+  const history = await fetchImportHistory(10);
+  const wrap = document.createElement("div");
+  wrap.className = "card";
+  wrap.style.marginTop = "24px";
+  wrap.innerHTML = `
+    <div class="card-head">
+      <h2>Historial de importaciones</h2>
+      <span style="color: var(--text-mute); font-size: 12px;">Últimas 10 · podés deshacer cada una</span>
+    </div>
+    ${history.length === 0 ? `
+      <p style="color: var(--text-soft); margin: 0;">Todavía no hiciste imports. Cuando subas un Excel o un Sheet vas a poder revertirlo desde acá.</p>
+    ` : `
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Fecha</th>
+              <th>Origen</th>
+              <th>Cambios</th>
+              <th>Usuario</th>
+              <th style="text-align:right;">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${history.map(historyRow).join("")}
+          </tbody>
+        </table>
+      </div>
+    `}
+  `;
+  outlet.appendChild(wrap);
+
+  wrap.addEventListener("click", async (e) => {
+    const undoBtn = e.target.closest("[data-undo]");
+    const dropBtn = e.target.closest("[data-drop]");
+    if (undoBtn) {
+      const id = undoBtn.dataset.undo;
+      const snap = history.find((h) => h.id === id);
+      const stats = snap.stats || {};
+      const ok = await confirmDialog({
+        title: "Deshacer importación",
+        message: `Vamos a restaurar ${stats.updated || 0} producto${stats.updated === 1 ? "" : "s"} a su estado anterior y eliminar ${stats.created || 0} producto${stats.created === 1 ? "" : "s"} creado${stats.created === 1 ? "" : "s"} en este import. ¿Continuar?`,
+        confirmText: "Sí, deshacer",
+        danger: true,
+      });
+      if (!ok) return;
+      undoBtn.disabled = true;
+      undoBtn.innerHTML = `<span class="spinner"></span>`;
+      try {
+        await rollbackImport(snap);
+        await deleteImportSnapshot(id);
+        toast("Importación revertida");
+        renderImport(document.getElementById("route-outlet"));
+      } catch (err) {
+        toast("Error al revertir: " + err.message, "error");
+        undoBtn.disabled = false;
+        undoBtn.textContent = "Deshacer";
+      }
+    } else if (dropBtn) {
+      const id = dropBtn.dataset.drop;
+      const ok = await confirmDialog({
+        title: "Borrar del historial",
+        message: "Esto borra solo el registro del historial. Los cambios al catálogo se mantienen tal cual están.",
+        confirmText: "Borrar registro",
+        danger: true,
+      });
+      if (!ok) return;
+      await deleteImportSnapshot(id);
+      toast("Registro borrado");
+      renderImport(outlet.parentElement || outlet);
+    }
+  });
+}
+
+function historyRow(h) {
+  const stats = h.stats || {};
+  const srcLabel = h.source === "sheets" ? "Google Sheets" : h.source === "excel" ? "Excel" : (h.source || "—");
+  return `
+    <tr>
+      <td>${formatDateTime(h.createdAt)}</td>
+      <td><span class="badge badge-info">${escapeHtml(srcLabel)}</span>${h.fileName && h.source === "excel" ? `<div style="font-size:11px; color:var(--text-mute); margin-top:2px;">${escapeHtml(h.fileName)}</div>` : ""}</td>
+      <td>
+        ${stats.updated ? `<span style="margin-right:8px;">↻ ${stats.updated} actualizado${stats.updated === 1 ? "" : "s"}</span>` : ""}
+        ${stats.created ? `<span style="color:var(--success);">+ ${stats.created} creado${stats.created === 1 ? "" : "s"}</span>` : ""}
+        ${!stats.updated && !stats.created ? `<span style="color:var(--text-mute);">sin cambios</span>` : ""}
+      </td>
+      <td><span style="color:var(--text-soft); font-size:12px;">${escapeHtml(h.userEmail || "—")}</span></td>
+      <td style="text-align:right; white-space:nowrap;">
+        <button class="btn btn-secondary btn-sm" data-undo="${h.id}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+          Deshacer
+        </button>
+        <button class="btn btn-ghost btn-sm" data-drop="${h.id}" title="Borrar registro" style="color:var(--text-mute);">×</button>
+      </td>
+    </tr>`;
+}
+}
+
+// Reconoce el primer sheet con cabecera real ("ID" / "Nombre" / "Precio").
+function pickCatalogSheet(wb) {
+  for (const name of wb.SheetNames) {
+    const sheet = wb.Sheets[name];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+    if (rows.some(rowLooksLikeHeader)) return sheet;
+  }
+  return wb.Sheets[wb.SheetNames[0]];
+}
+
+function rowLooksLikeHeader(row) {
+  const text = row.map((c) => String(c || "").toLowerCase()).join("|");
+  return /\b(id|sku)\b/.test(text)
+      && /\b(nombre|name|producto)\b/.test(text)
+      && /\b(precio|price)\b/.test(text);
+}
+
+// Convierte un sheet a array de objetos, saltando filas de título previas a la cabecera.
+function extractRows(sheet) {
+  const raw = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  let headerIdx = raw.findIndex(rowLooksLikeHeader);
+  if (headerIdx === -1) {
+    // fallback: usar primera fila como cabecera
+    return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+  }
+  const headers = raw[headerIdx].map((h) => String(h).trim());
+  const out = [];
+  for (let i = headerIdx + 1; i < raw.length; i++) {
+    const row = raw[i];
+    if (row.every((c) => c === "" || c == null)) continue;
+    const obj = {};
+    headers.forEach((h, j) => { obj[h] = row[j] ?? ""; });
+    out.push(obj);
+  }
+  return out;
+}
+
+function parseRow(r, categories) {
+  // Normalizamos nombres de columna: minúsculas, sin espacios, sin acentos, sin paréntesis.
   const norm = (k) =>
     String(k)
       .toLowerCase()
       .normalize("NFD")
       .replace(/\p{Diacritic}/gu, "")
-      .replace(/\s+/g, "");
+      .replace(/\([^)]*\)/g, "") // quita "(%)", "($)" etc.
+      .replace(/[^a-z0-9]+/g, "");
   const map = {};
   for (const k of Object.keys(r)) map[norm(k)] = r[k];
 
   const get = (...keys) => {
     for (const k of keys) {
-      if (map[k] !== undefined && map[k] !== "") return map[k];
+      if (map[k] !== undefined && map[k] !== "" && map[k] !== null) return map[k];
     }
     return undefined;
   };
 
-  const out = {};
-  if (get("nombre", "name", "producto") !== undefined) out.name = String(get("nombre", "name", "producto")).trim();
-  if (get("descripcion", "description") !== undefined) out.description = String(get("descripcion", "description")).trim();
-  if (get("precio", "price") !== undefined) out.price = num(get("precio", "price"));
-  if (get("precioanterior", "preciooriginal", "priceold") !== undefined) out.priceOld = num(get("precioanterior", "preciooriginal", "priceold"));
-  if (get("stock", "cantidad") !== undefined) out.stock = parseInt(num(get("stock", "cantidad")), 10) || 0;
-  if (get("activo", "active", "estado") !== undefined) out.active = bool(get("activo", "active", "estado"));
-  if (get("destacado", "featured") !== undefined) out.featured = bool(get("destacado", "featured"));
-  if (get("talles", "sizes") !== undefined) out.sizes = list(get("talles", "sizes"));
-  if (get("colores", "colors") !== undefined) out.colors = list(get("colores", "colors"));
-  const catRaw = get("categoria", "category");
-  if (catRaw) {
-    const cat = catByName(catRaw);
-    if (cat) out.categoryId = cat.id;
+  const name = get("nombredelproducto", "nombre", "name", "producto");
+  if (!name) return null;
+
+  const idCol = get("idfirestore"); // por si el usuario agregó esta columna manualmente
+  const sku = String(get("id", "sku", "codigo") || "").trim();
+
+  const fields = { name: String(name).trim() };
+
+  if (sku) fields.sku = sku;
+  if (get("descripcion", "description", "notas") !== undefined) fields.description = String(get("descripcion", "description", "notas")).trim();
+  if (get("precio", "precioventa", "price") !== undefined) fields.price = num(get("precio", "precioventa", "price"));
+  if (get("preciooriginal", "precioanterior", "priceold") !== undefined) fields.priceOld = num(get("preciooriginal", "precioanterior", "priceold"));
+  if (get("costo", "cost") !== undefined) fields.cost = num(get("costo", "cost"));
+  if (get("stock", "cantidad") !== undefined) fields.stock = parseInt(num(get("stock", "cantidad")), 10) || 0;
+  if (get("activo", "active", "estado") !== undefined) fields.active = bool(get("activo", "active", "estado"));
+  if (get("destacado", "featured") !== undefined) fields.featured = bool(get("destacado", "featured"));
+  if (get("tallesdisponibles", "talles", "sizes") !== undefined) fields.sizes = list(get("tallesdisponibles", "talles", "sizes"));
+  if (get("colores", "colors") !== undefined) fields.colors = list(get("colores", "colors"));
+
+  // Resolver categoría: priorizamos combo Género+Categoría → slug del seed (ej. "Hombre"+"Camiseta" → "hombres-camisetas").
+  // Si no matchea, caemos al match por nombre exacto de categoría.
+  const genero = String(get("genero", "seccion", "gender") || "").toLowerCase().trim();
+  const categoria = String(get("categoria", "category") || "").trim();
+  if (categoria) {
+    const parent = genero.startsWith("h") ? "hombres" : genero.startsWith("m") ? "mujeres" : "";
+    const cat = resolveCategory(categories, categoria, parent);
+    if (cat) fields.categoryId = cat.id;
   }
-  return out;
+
+  return { id: idCol ? String(idCol).trim() : null, sku, fields };
+}
+
+function resolveCategory(categories, name, parent) {
+  const nameNorm = name.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").trim();
+  // Match estricto por sección + nombre que empieza con el texto del Excel
+  // Ej: "Camiseta" + parent "hombres" → "Camisetas" en parent "hombres"
+  const matchesName = (catName) => {
+    const n = catName.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").trim();
+    return n === nameNorm || n.startsWith(nameNorm) || nameNorm.startsWith(n);
+  };
+  if (parent) {
+    const c = categories.find((x) => x.parent === parent && matchesName(x.name));
+    if (c) return c;
+  }
+  return categories.find((x) => matchesName(x.name));
 }
 
 function num(v) {
   if (v === "" || v == null) return null;
-  const cleaned = String(v).replace(/[^\d.,-]/g, "").replace(",", ".");
-  const n = Number(cleaned);
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  let s = String(v).replace(/[^\d.,-]/g, "").trim();
+  if (!s) return null;
+  // Detectar formato es-AR ($45.000 = 45000) vs en-US ($45,000.50 = 45000.50).
+  // Regla: el último separador es el decimal; el otro es de miles.
+  const lastDot = s.lastIndexOf(".");
+  const lastComma = s.lastIndexOf(",");
+  if (lastDot >= 0 && lastComma >= 0) {
+    if (lastDot > lastComma) s = s.replace(/,/g, "");                   // en-US
+    else s = s.replace(/\./g, "").replace(",", ".");                    // es-AR
+  } else if (lastDot >= 0) {
+    const parts = s.split(".");
+    // múltiples puntos, o un punto con 3 dígitos al final = separador de miles
+    if (parts.length > 2 || parts[parts.length - 1].length === 3) s = s.replace(/\./g, "");
+  } else if (lastComma >= 0) {
+    const parts = s.split(",");
+    if (parts.length > 2 || parts[parts.length - 1].length === 3) s = s.replace(/,/g, "");
+    else s = s.replace(",", ".");
+  }
+  const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
 function bool(v) {
@@ -209,29 +448,46 @@ function list(v) {
   return String(v).split(/[,;|]/).map((s) => s.trim()).filter(Boolean);
 }
 
-function exportFile(products, catName, format) {
-  const rows = products.map((p) => ({
-    id: p.id,
-    nombre: p.name || "",
-    descripcion: p.description || "",
-    categoria: catName(p.categoryId),
-    precio: p.price ?? "",
-    preciOAnterior: p.priceOld ?? "",
-    stock: p.stock ?? 0,
-    talles: (p.sizes || []).join(", "),
-    colores: (p.colors || []).join(", "),
-    activo: p.active ? "Si" : "No",
-    destacado: p.featured ? "Si" : "No",
-    imagenPrincipal: p.images?.find((i) => i.isMain)?.url || p.images?.[0]?.url || "",
-  }));
+function exportFile(products, catById, format) {
+  // Formato espejo del Excel de control de stock: ID = sku, Género viene del
+  // parent de la categoría, Categoría = nombre legible. Mantenemos una columna
+  // "ID Firestore" oculta al final para que el import detecte el doc exacto.
+  const rows = products.map((p) => {
+    const cat = catById(p.categoryId);
+    const genero = cat?.parent === "hombres" ? "Hombre" : cat?.parent === "mujeres" ? "Mujer" : "";
+    const precio = Number(p.price ?? 0);
+    const costo = Number(p.cost ?? 0);
+    const ganancia = costo > 0 ? precio - costo : "";
+    const gananciaPct = costo > 0 ? Math.round(((precio - costo) / costo) * 100) : "";
+    const stock = p.stock ?? 0;
+    const alerta = stock <= 0 ? "SIN STOCK" : stock <= 3 ? "BAJO" : "OK";
+    return {
+      "ID": p.sku || "",
+      "Genero": genero,
+      "Categoria": cat?.name?.replace(/^(Camisetas?|Camperas?|Conjuntos?|Pantalones?|Zapatillas|Perfumes?|Buzos y Sweaters)( Mujer)?$/i, (m) => m.replace(/ Mujer$/i, "")) || "",
+      "Nombre del Producto": p.name || "",
+      "Precio ($)": p.price ?? "",
+      "Costo ($)": p.cost ?? "",
+      "Ganancia ($)": ganancia,
+      "Ganancia (%)": gananciaPct,
+      "Talles Disponibles": (p.sizes || []).join(","),
+      "Stock": stock,
+      "Alerta Stock": alerta,
+      "Notas": p.description || "",
+      "Activo": p.active ? "Si" : "No",
+      "Destacado": p.featured ? "Si" : "No",
+      "ID Firestore": p.id,
+    };
+  });
 
   const ws = XLSX.utils.json_to_sheet(rows);
   ws["!cols"] = [
-    { wch: 22 }, { wch: 32 }, { wch: 40 }, { wch: 18 }, { wch: 10 }, { wch: 14 },
-    { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 8 }, { wch: 10 }, { wch: 40 },
+    { wch: 8 }, { wch: 10 }, { wch: 14 }, { wch: 38 }, { wch: 12 }, { wch: 12 },
+    { wch: 14 }, { wch: 12 }, { wch: 22 }, { wch: 8 }, { wch: 12 }, { wch: 40 },
+    { wch: 8 }, { wch: 10 }, { wch: 22 },
   ];
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Productos");
+  XLSX.utils.book_append_sheet(wb, ws, "CATALOGO");
 
   const stamp = new Date().toISOString().slice(0, 10);
   const filename = `sport17_catalogo_${stamp}.${format}`;
