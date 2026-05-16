@@ -4,87 +4,345 @@
 
 Tienda online para SPORT17 / Nico Web.
 
-Objetivo:
-Home moderna, comercial y profesional para vender ropa deportiva urbana desde Instagram y WhatsApp.
+Objetivo: home moderna, comercial y profesional para vender ropa deportiva urbana
+desde Instagram y WhatsApp.
 
-## Cambios hechos
+## Stack
 
-### Base general
+- HTML/CSS/JS vanilla (sin npm ni build) en la home publica.
+- Admin con modulos ES + Firebase (Auth, Firestore, Storage).
+- Firebase Hosting (proyecto: `sport17-a01f6`).
 
-- Se creo la home principal en [index.html](C:/Users/Administrador/OneDrive/Desktop/GRC/nico-web/index.html).
-- Se creo el estilo general en [styles.css](C:/Users/Administrador/OneDrive/Desktop/GRC/nico-web/styles.css).
-- Se creo la logica visual e interacciones en [main.js](C:/Users/Administrador/OneDrive/Desktop/GRC/nico-web/main.js).
+---
 
-### Identidad visual
+## Identidad visual
 
-- Se uso `logo2.0.png` como logo principal.
-- Se definio una estetica oscura con acentos claros y azules.
-- Se adapto la home para mobile first y responsive.
+- Logo: `logo2.0.webp` (de `logo2.0.png` original).
+- Estetica oscura con acentos azules y blancos.
+- Mobile-first y responsive.
+- WhatsApp: `+54 9 11 3663-4655`.
 
-### Hero principal
+---
 
-- Se reemplazo el hero estatico por un carrusel con 3 slides.
-- El carrusel usa imagenes locales del proyecto y no depende de `iagen/`.
-- Slide 1:
-  Usa productos masculinos y femeninos con el logo SPORT17 en el centro.
-- Slide 2:
-  Comunica `3 cuotas sin interes`.
-- Slide 3:
-  Comunica `15% de descuento pagando en efectivo o transferencia`.
+## Sesion 2026-05-15 — Mejoras integrales y bugs criticos
 
-### Catalogo
+### 1. WhatsApp FAB flotante
 
-- Se creo una seccion de colecciones con tabs:
-  `Hombres` y `Mujeres`.
-- Cada tab carga todos los productos disponibles de su seccion.
-- Los productos se muestran agrupados por categoria.
+- Boton circular verde con pulso, siempre visible en la esquina inferior derecha.
+- Tooltip "Te ayudamos?" al hover (desktop).
+- Numero leido de `settings.whatsapp` en Firestore o fallback a `STORE_CONFIG.whatsappNumber`.
 
-### Hombres
+### 2. Banner promocional dinamico
 
-- Camisetas
-- Camperas
-- Conjuntos
-- Pantalones
-- Zapatillas
-- Perfumes
+- Banner azul gradient animado arriba de todo el sitio.
+- Texto leido de `settings.promoBanner` en Firestore.
+- Editable desde admin > Configuracion > "Texto del banner promocional".
+- Se puede cerrar (X). Queda dismissed por sesion via `sessionStorage`.
 
-### Mujeres
+### 3. Lupa en el header (estilo Tiendanube/MG)
 
-- Buzos
-- Camperas
-- Conjuntos
-- Perfumes
+- Input de busqueda integrado en el header (no inline en el catalogo).
+- Desktop: input visible siempre, al lado del logo.
+- Mobile: icono lupa que abre un overlay full-width al tocarlo.
+- Cierra con click fuera o tecla Escape.
+- IDs: `#header-search`, `#header-search-toggle`, `#search-input`, `#search-clear`.
 
-### Destacados
+### 4. Buscador con filtro CSS (no destruye el DOM)
 
-- La seccion `Destacados` se convirtio en una seccion de mockups visuales.
-- Actualmente toma piezas derivadas del nuevo hero.
+**Bug original**: al buscar, la pagina se acortaba drasticamente y el browser
+tiraba al usuario al top.
 
-### WhatsApp y contacto
+**Solucion**: ahora se pintan TODAS las cards una sola vez con un atributo
+`data-search="texto buscable"`. El filtro solo agrega/quita la clase `.is-hidden`
+con CSS. El DOM no se destruye → el scroll del usuario se preserva.
 
-- Se configuro WhatsApp con el numero:
-  `+54 9 11 3663-4655`
-- Los botones principales ya apuntan al link de WhatsApp.
+- Funcion: `applySearchFilterToDom()` en `main.js`.
+- Si el usuario busca sin haber elegido coleccion, se abre la que tiene mas
+  matches (sin scroll).
+- Tecla Enter en el input hace `preventDefault` + `blur()` (cierra el teclado
+  mobile, no recarga la pagina).
+
+### 5. Skeleton loading
+
+- Mientras Firestore carga los productos, se muestra un grid de placeholders
+  con animacion shimmer.
+- Reemplaza la pantalla blanca durante la carga.
+
+### 6. Auto-play del hero carousel
+
+- Avanza solo cada 5.5 segundos.
+- Pausa al hover/focus/tab inactivo (visibilitychange).
+- Si el usuario toca prev/next/dots, se pausa y reanuda 10s despues.
+
+**Bug critico arreglado**: el original usaba `slide.scrollIntoView({ block: "nearest" })`
+que tambien scrollea verticalmente la pagina, tirando al usuario al hero cada vez
+que avanzaba. Reemplazado por `heroTrack.scrollTo({ left: slide.offsetLeft })`
+que solo afecta el scroll horizontal del track.
+
+### 7. Boton volver arriba
+
+- Aparece (fade-in) cuando el usuario scrollea mas de 600px.
+- Click hace `window.scrollTo({ top: 0, behavior: "smooth" })`.
+
+### 8. Compartir producto
+
+- Boton compartir aparece al hover sobre cada card.
+- Usa Web Share API nativo si esta disponible.
+- Fallback: copia URL al portapapeles + abre WhatsApp con el mensaje.
+- Toast custom de confirmacion ("Link copiado").
+
+### 9. Badges comerciales en productos
+
+- **Badge `-X%`** (gradient naranja-rojo) si `priceOld > price`.
+  Calculado automaticamente: `(1 - price/priceOld) * 100`.
+- **Badge `NUEVO`** (gradient azul) si `createdAt < 14 dias`.
+- **Badge `Sin stock`** (rojo) si `stock <= 0`.
+- Apilados verticalmente arriba a la izquierda, no se montan.
+
+### 10. Normalizacion automatica de precios
+
+Historicamente algunos precios se guardaron en miles (45) y otros en pesos exactos
+(45000). Para no mostrar `$45` por mistake:
+
+- `priceForDisplay()` en `main.js`: si valor < 1000, multiplica x1000 visualmente.
+- `formatPrice()` y `formatPriceShort()` en `admin/modules/helpers.js`: igual.
+- Esto es solo visual. La normalizacion definitiva en la BD se hace desde
+  admin > Configuracion > Limpiar catalogo.
+
+### 11. Performance / SEO / PWA
+
+- **Preload** del `hero.webp` con `fetchpriority="high"` → mejora LCP.
+- **Preconnect** a `firestore.googleapis.com` y `firebasestorage.googleapis.com`.
+- **`robots.txt`** con sitemap y `Disallow: /admin/`.
+- **`sitemap.xml`** con imagenes (`<image:image>` tags).
+- **`manifest.webmanifest`** para instalar la PWA en mobile.
+- **Favicon** y apple-touch-icon usando `logo2.0.webp`.
+
+### 12. Headers de seguridad (`firebase.json`)
+
+- `X-Content-Type-Options: nosniff`
+- `Referrer-Policy: strict-origin-when-cross-origin`
+- `X-Frame-Options: SAMEORIGIN`
+- `Permissions-Policy: geolocation=(), microphone=(), camera=()`
+- Content-Type explicito para `/manifest.webmanifest`, `/sitemap.xml`, `/robots.txt`.
+
+### 13. Bug critico: contraseña admin en la URL
+
+**Problema descubierto**: el `<form id="login-form">` del admin no tenia
+`method` ni `action`. Como los modulos ES cargan async, si el usuario apretaba
+Enter antes que `admin.js` registrara el `addEventListener`, el form se enviaba
+nativamente por GET y la contraseña terminaba en la URL
+(`admin/?email=...&password=...`). Quedaba en el historial del navegador y en
+la sync de Chrome.
+
+**Fix aplicado en `admin/index.html`**:
+- `method="post" action="javascript:void(0)"` → nunca se envia por GET aunque
+  el JS no haya cargado.
+- Script inline en `<head>` que detecta y borra de la URL cualquier param
+  sensible (`password`, `pass`, `pwd`, `email`, `token`, `secret`, `key`,
+  `apikey`) usando `history.replaceState`. Se ejecuta antes que cualquier
+  modulo, sin depender del bundle.
+
+### 14. "¿Olvidaste tu contraseña?" en el admin
+
+- Link discreto debajo del boton "Ingresar".
+- Usa `sendPasswordResetEmail` de Firebase Auth.
+- Pide que el usuario haya escrito su email arriba.
+- Envia email con link de reset → no requiere acceso a Firebase Console.
+
+### 15. SyntaxError en `view-import.js`
+
+**Bug**: linea 313 tenia un `}` de mas que rompia el bundle entero del admin.
+Sin admin.js corriendo, la pantalla del admin quedaba en blanco. **Fix**: se
+elimino la llave extra.
+
+### 16. Tonos del fondo "vibrando" al escribir en la lupa
+
+**Causa**: dos cosas combinadas:
+1. El `:focus-within` tenia `box-shadow` con `rgba(47,124,255,0.14)` y un
+   cambio de `background` que pulsaba al focusear.
+2. El header con `backdrop-filter: blur(18px)` mostraba cambios del contenido
+   detras a traves del blur cada vez que el contenido cambiaba.
+
+**Fix**:
+- Se saco el `box-shadow` pulsante (solo cambia el color del borde).
+- El header se vuelve mas opaco (`rgba(5,7,11,0.94)`) cuando el input esta
+  focuseado usando el selector `.site-header:has(.header-search-field input:focus)`.
+
+### 17. Limpieza de catalogo (admin > Configuracion)
+
+Nuevo card **"Limpiar catalogo"**:
+
+- **Analizar catalogo**: detecta productos duplicados (mismo nombre normalizado)
+  y precios sospechosamente bajos (< 1000, que deberian estar en miles).
+- Muestra resumen: cuantos duplicados, cuantos precios, primeros 20 grupos.
+- **Aplicar limpieza** (con confirm dialog):
+  - Conserva el "mejor" de cada grupo (mas imagenes > precio > descripcion > stock > fecha).
+  - Borra los duplicados + sus imagenes del Storage.
+  - Multiplica x1000 todos los `price` y `priceOld` que esten abajo de 1000.
+  - Lotes seguros de 400 docs (limite Firestore: 500).
+
+Nuevo card **"Acciones destructivas"**:
+
+- **Borrar productos sin imagen**: listo cuantos son, primeros 10, doble
+  confirmacion antes de aplicar. Lotes de 400.
+
+### 18. Excel completo (admin > Importar / Exportar)
+
+Reescrito el export para imitar el Sheets maestro del cliente. **21 columnas**:
+
+1. ID (P001, P002... autogenerado si no hay `sku`)
+2. Genero (Hombre / Mujer)
+3. Categoria (en singular: Camiseta, Conjunto, Pantalon, etc.)
+4. Nombre del Producto
+5. **Colores** (separados por coma)
+6. Talles Disponibles
+7. Precio ($) — formato moneda `$45.000`
+8. **Precio Anterior ($)** — formato moneda
+9. **% Descuento** — calculado automaticamente
+10. Costo ($) — formato moneda
+11. Ganancia ($) — calculado
+12. Ganancia (%) — calculado
+13. Stock
+14. Alerta Stock (OK / BAJO / AGOTADO)
+15. **Imagen Principal** (URL)
+16. Notas
+17. **Creado** (DD/MM/YYYY HH:mm)
+18. **Ultimo Cambio** (DD/MM/YYYY HH:mm)
+19. Activo (Si / No)
+20. Destacado (Si / No)
+21. ID Firestore (no tocar, usado para matchear en imports)
+
+Mejoras adicionales:
+- Freeze pane en la primera fila.
+- Autofiltro en todas las columnas.
+- Ordenado por genero > categoria > nombre.
+- Anchos de columna optimizados.
+- Hoja secundaria **"AYUDA"** con descripcion de cada columna, valores validos
+  y si es editable en import o no.
+
+---
+
+## Estructura del repo (relevante)
+
+```
+.
+├── index.html                   # Home publica
+├── main.js                      # Logica de la home (Firestore live)
+├── styles.css                   # Estilos de la home
+├── manifest.webmanifest         # PWA
+├── robots.txt                   # SEO
+├── sitemap.xml                  # SEO
+├── firebase.json                # Hosting + headers + Firestore + Storage
+├── firestore.rules
+├── firestore.indexes.json
+├── storage.rules
+├── femenino/ masculino/ perfumes/ secciones/   # Imagenes legacy
+├── admin/
+│   ├── index.html
+│   ├── admin.css
+│   ├── admin.js                 # Router + bootstrap + scrub URL sensible
+│   ├── firebase-config.js       # Credenciales + ADMIN_EMAILS
+│   ├── firebase-init.js
+│   └── modules/
+│       ├── auth.js              # Login + sendPasswordReset
+│       ├── data.js              # CRUD Firestore
+│       ├── helpers.js           # formatPrice normalizado
+│       ├── images.js            # Subida + optimizacion Storage
+│       ├── seed.js, seed-data.js
+│       ├── ui.js                # Toasts, modales, confirm
+│       ├── view-dashboard.js
+│       ├── view-products.js
+│       ├── view-categories.js
+│       ├── view-stock.js
+│       ├── view-import.js       # Export con 21 cols + AYUDA
+│       └── view-settings.js     # Limpiar catalogo + borrar sin imagen
+```
+
+---
+
+## Modelo de datos (Firestore)
+
+### `products/{id}`
+```
+{
+  name, description, sku,
+  price, priceOld, cost,
+  stock, categoryId,
+  sizes: [], colors: [],
+  active, featured,
+  images: [{ url, path, isMain }],
+  order, createdAt, updatedAt
+}
+```
+
+### `categories/{id}`
+```
+{
+  name, description,
+  coverImage: { url, path },
+  active, order,
+  parent: "hombres" | "mujeres",
+  createdAt, updatedAt
+}
+```
+
+### `settings/store`
+```
+{
+  whatsapp, lowStock,
+  hideOutOfStock,
+  promoBanner,
+  updatedAt
+}
+```
+
+### `import-history/{id}` (para deshacer imports)
+```
+{
+  source: "excel" | "sheets",
+  fileName, userEmail,
+  updated: [{ id, before: {...} }],
+  created: [productId],
+  createdAt
+}
+```
+
+---
 
 ## Decisiones tomadas
 
-- No usar imagenes externas para el contenido principal.
+- No usar imagenes externas para el contenido principal de la home.
 - No mover ni renombrar archivos del proyecto.
-- Priorizar rutas locales existentes.
+- Priorizar rutas locales existentes para legacy.
 - Mantener el sitio facil de editar.
+- Renderizar TODOS los productos al cargar y filtrar via CSS (no destruir DOM).
+- Normalizar precios visualmente (x1000 si <1000) sin tocar la BD (la limpieza
+  formal se hace desde el admin).
+
+---
 
 ## Pendientes / Por hacer
 
+- Migrar imagenes legacy del repo a Firebase Storage (re-subir desde el panel).
+- Conectar Google Analytics (`measurementId` ya esta en `firebase-config.js`).
+- Conectar 2FA en Firebase Auth.
+- Aplicar la limpieza de catalogo desde el admin para dejar la BD definitivamente
+  normalizada.
+- Subir las imagenes faltantes en los productos que estan "Sin foto".
 - Afinar el hero para que se parezca mas a la referencia visual deseada.
-- Revisar el recorte de las imagenes en el carrusel para mejorar composicion.
-- Mejorar la seccion `Destacados` si hace falta separarla mas del hero.
-- Revisar tipografias y espaciados del header.
-- Ajustar detalles de responsive fino en mobile y desktop.
-- Evaluar si conviene agregar lightbox o vista ampliada en productos.
 - Completar enlaces reales de redes sociales si el cliente los pasa.
-- Ajustar footer final con datos reales de marca.
 
-## Notas
+---
 
-- El archivo `memory.md` funciona como registro vivo.
+## Notas tecnicas
+
+- El archivo `memory.md` funciona como registro vivo del proyecto.
 - Cada vez que hagamos un cambio importante, conviene actualizar esta memoria.
+- Los precios en la BD pueden estar en miles (45) o en pesos exactos (45000).
+  El frontend normaliza visualmente. La limpieza formal se hace desde el admin.
+- El admin solo es accesible para los emails listados en `ADMIN_EMAILS`
+  (`admin/firebase-config.js`) y validados por las reglas de Firestore/Storage.
+- El servidor local de desarrollo se levanta con:
+  `python -c "from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler; ThreadingHTTPServer(('0.0.0.0', 5500), SimpleHTTPRequestHandler).serve_forever()"`
+- `http.server` sin `ThreadingHTTPServer` se cuelga rapido (single-threaded).

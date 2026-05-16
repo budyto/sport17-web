@@ -1,6 +1,6 @@
 // ─── Bootstrap del panel admin ───────────────────────────────────────────────
 
-import { watchAuth, onAuth, login, logout, humanizeAuthError } from "./modules/auth.js";
+import { watchAuth, onAuth, login, logout, humanizeAuthError, sendPasswordReset } from "./modules/auth.js";
 import { $, $$ } from "./modules/helpers.js";
 import { toast } from "./modules/ui.js";
 import { renderDashboard } from "./modules/view-dashboard.js";
@@ -85,6 +85,9 @@ function setupApp(user) {
 
 window.addEventListener("hashchange", navigate);
 
+// (El scrub de query params sensibles vive inline en admin/index.html — se
+//  ejecuta antes que cualquier módulo y no depende de que este archivo cargue.)
+
 // ═══ Login form ═══
 const loginForm = $("#login-form");
 const loginError = $("#login-error");
@@ -103,6 +106,30 @@ loginForm?.addEventListener("submit", async (e) => {
   } finally {
     submitBtn.disabled = false;
     submitBtn.textContent = "Ingresar";
+  }
+});
+
+// ═══ Olvidé mi contraseña ═══
+$("#forgot-password")?.addEventListener("click", async (e) => {
+  e.preventDefault();
+  const emailInput = loginForm?.querySelector("input[name=email]");
+  const email = (emailInput?.value || "").trim();
+  if (!email) {
+    loginError.textContent = "Escribí tu email arriba y volvé a tocar el link.";
+    loginError.hidden = false;
+    emailInput?.focus();
+    return;
+  }
+  loginError.hidden = true;
+  try {
+    await sendPasswordReset(email);
+    loginError.style.color = "var(--success, #16a34a)";
+    loginError.textContent = "Te mandamos un email con el link para resetear la contraseña.";
+    loginError.hidden = false;
+  } catch (err) {
+    loginError.style.color = "";
+    loginError.textContent = humanizeAuthError(err);
+    loginError.hidden = false;
   }
 });
 

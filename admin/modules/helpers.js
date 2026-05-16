@@ -32,16 +32,27 @@ export function escapeHtml(str = "") {
     .replace(/'/g, "&#039;");
 }
 
+// Historicamente algunos precios se guardaron en miles (ej: 45 = $45.000).
+// Si el valor es < 1000 lo tratamos como miles para mostrarlo bien en el admin,
+// igual que en la home publica. La limpieza de la BD lo normaliza definitivo.
+function normalizePriceForDisplay(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return n;
+  return n < 1000 ? n * 1000 : n;
+}
+
 export function formatPrice(value) {
   if (value == null || value === "") return "—";
   const n = Number(value);
   if (Number.isNaN(n)) return "—";
-  return `$${n.toLocaleString("es-AR")}`;
+  const normalized = normalizePriceForDisplay(n);
+  return `$${normalized.toLocaleString("es-AR")}`;
 }
 
 export function formatPriceShort(value) {
   if (value == null || value === "") return "—";
-  return `$${Number(value).toLocaleString("es-AR")}`;
+  const normalized = normalizePriceForDisplay(Number(value));
+  return `$${normalized.toLocaleString("es-AR")}`;
 }
 
 export function slugify(str = "") {

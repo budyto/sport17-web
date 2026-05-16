@@ -1,0 +1,27 @@
+{
+  "name": "SPORT17 — Indumentaria deportiva importada",
+  "short_name": "SPORT17",
+  "description": "Ropa deportiva importada premium para hombre y mujer. Conjuntos, camperas, zapatillas y perfumes.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#05070b",
+  "theme_color": "#05070b",
+  "lang": "es-AR",
+  "categories": ["shopping", "lifestyle"],
+  "icons": [
+    {
+      "src": "/logo2.0.webp",
+      "sizes": "192x192",
+      "type": "image/webp",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo2.0.webp",
+      "sizes": "512x512",
+      "type": "image/webp",
+      "purpose": "any maskable"
+    }
+  ]
+}

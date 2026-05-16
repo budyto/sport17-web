@@ -6,6 +6,7 @@ import {
   signInWithEmailAndPassword,
   signOut,
 } from "../firebase-init.js";
+import { sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { ADMIN_EMAILS } from "../firebase-config.js";
 
 let currentUser = null;
@@ -50,6 +51,11 @@ export async function login(email, password) {
 
 export async function logout() {
   await signOut(auth);
+}
+
+export async function sendPasswordReset(email) {
+  if (!email || !email.trim()) throw new Error("Ingresá tu email primero.");
+  await sendPasswordResetEmail(auth, email.trim());
 }
 
 export function humanizeAuthError(err) {

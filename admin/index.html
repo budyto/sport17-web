@@ -6,19 +6,41 @@
     <meta name="robots" content="noindex, nofollow" />
     <title>Panel admin · SPORT17</title>
     <link rel="icon" href="../logo2.0.webp" />
+
+    <!-- DEFENSA EN PROFUNDIDAD: si la URL llega con credenciales (?password=...
+         por un submit GET accidental, link compartido, autocompletado, etc.),
+         las borramos del historial inmediatamente, antes de cualquier módulo. -->
+    <script>
+    (function () {
+      if (!window.location.search) return;
+      var params = new URLSearchParams(window.location.search);
+      var sensitive = ["password", "pass", "pwd", "email", "token", "secret", "key", "apikey"];
+      var dirty = false;
+      sensitive.forEach(function (k) { if (params.has(k)) { params.delete(k); dirty = true; } });
+      if (dirty) {
+        var clean = window.location.pathname + (params.toString() ? "?" + params.toString() : "") + window.location.hash;
+        window.history.replaceState({}, "", clean);
+      }
+    })();
+    </script>
+
     <link rel="stylesheet" href="./admin.css" />
     <script type="module" src="./admin.js" defer></script>
   </head>
   <body>
 
     <!-- ═══ LOGIN ═══ -->
-    <section id="login-screen" class="login-screen" hidden>
+    <!-- Visible por default: si el JS o Firebase fallan, el login se muestra igual. -->
+    <section id="login-screen" class="login-screen">
       <div class="login-card">
         <img src="../logo2.0.webp" alt="SPORT17" class="login-logo" />
         <h1>Panel admin SPORT17</h1>
         <p class="login-sub">Ingresá con tus credenciales para gestionar la tienda.</p>
 
-        <form id="login-form" class="login-form">
+        <!-- method="post" + action="javascript:void(0)" garantiza que NUNCA
+             se envíe nativamente por GET (lo que pondría la contraseña en la URL).
+             El submit real lo maneja admin.js con preventDefault. -->
+        <form id="login-form" class="login-form" method="post" action="javascript:void(0)" autocomplete="on" novalidate>
           <label>
             <span>Email</span>
             <input type="email" name="email" required autocomplete="username" />
@@ -29,6 +51,7 @@
           </label>
           <button type="submit" class="btn btn-primary btn-block">Ingresar</button>
           <p id="login-error" class="login-error" hidden></p>
+          <a href="#" id="forgot-password" class="login-forgot">¿Olvidaste tu contraseña?</a>
         </form>
 
         <p class="login-foot">Acceso restringido. Si no sos administrador, volvé al <a href="../index.html">sitio</a>.</p>

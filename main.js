@@ -24,6 +24,10 @@ const collectionRoots = {
   mujeres: document.getElementById("mujeres-grid"),
 };
 
+// ═══════ Búsqueda en vivo ═══════
+let searchQuery = "";
+let activeCollectionKey = null;
+
 // ═══════ Estado en memoria ═══════
 let storeSettings = { hideOutOfStock: false, whatsapp: STORE_CONFIG.whatsappNumber, lowStock: STORE_CONFIG.lowStockThreshold };
 const collectionData = { hombres: [], mujeres: [] };
@@ -102,26 +106,52 @@ function productToItem(p) {
   const main = p.images?.find((i) => i.isMain) || p.images?.[0];
   const others = (p.images || []).filter((i) => i !== main);
   const allImgs = [main, ...others].filter(Boolean).map((i) => i.url);
+
+  // Cálculo de descuento (normalizando precios que pudieron quedar en miles)
+  const rawPrice = Number(p.price);
+  const rawOld = Number(p.priceOld);
+  const normPrice = Number.isFinite(rawPrice) && rawPrice > 0 && rawPrice < 1000 ? rawPrice * 1000 : rawPrice;
+  const normOld = Number.isFinite(rawOld) && rawOld > 0 && rawOld < 1000 ? rawOld * 1000 : rawOld;
+  const discountPct = (Number.isFinite(normOld) && Number.isFinite(normPrice) && normOld > normPrice)
+    ? Math.round((1 - normPrice / normOld) * 100)
+    : 0;
+
+  // "Nuevo" si createdAt < 14 días
+  let isNew = false;
+  if (p.createdAt) {
+    const created = p.createdAt.toDate ? p.createdAt.toDate() : new Date(p.createdAt);
+    if (!Number.isNaN(created.getTime())) {
+      isNew = (Date.now() - created.getTime()) < 14 * 24 * 60 * 60 * 1000;
+    }
+  }
+
   return {
     src: main?.url || "",
     images: allImgs.length > 1 ? allImgs : undefined,
     label: p.name,
+    description: p.description || "",
+    sizes: p.sizes || [],
+    colors: p.colors || [],
     price: priceForDisplay(p.price),
     priceOld: priceForDisplay(p.priceOld),
+    discountPct,
+    isNew,
     stock: p.stock ?? 0,
     outOfStock: (p.stock ?? 0) <= 0,
     _order: p.order ?? 0,
   };
 }
 
-// La home antes mostraba "$45.000" cuando el dato era 45 (en miles).
-// Ahora guardamos el precio real en pesos: si parece que está en miles los
-// dejamos como están; si parece grande (> 1000) lo mostramos tal cual.
+// Históricamente algunos precios se guardaron en miles (ej: 45 = $45.000) y
+// otros en pesos exactos (ej: 45000 = $45.000). Si el valor es chico
+// (< 1000 y entero), asumimos que está en miles y multiplicamos x1000 para
+// mostrar bien al cliente, aunque el admin todavía no haya corrido la limpieza.
 function priceForDisplay(value) {
   if (value == null || value === "") return "";
   const n = Number(value);
-  if (!Number.isFinite(n)) return "";
-  return n.toLocaleString("es-AR");
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const normalized = n < 1000 ? n * 1000 : n;
+  return normalized.toLocaleString("es-AR");
 }
 
 // ═══════ Render ═══════
@@ -131,11 +161,27 @@ function renderItem(item) {
   const priceHTML = item.price
     ? `<p class="product-price">$${item.price}${item.priceOld ? ` <span style="color:#9ca3af; text-decoration:line-through; font-size:13px; margin-left:4px;">$${item.priceOld}</span>` : ""}</p>`
     : "";
+  // Badge de stock + badges comerciales (descuento + nuevo)
   const stockBadge = item.outOfStock ? `<span class="product-badge product-badge-out">Sin stock</span>` : "";
+  const discountBadge = item.discountPct > 0
+    ? `<span class="product-badge product-badge-discount">-${item.discountPct}%</span>`
+    : "";
+  const newBadge = item.isNew && !item.outOfStock
+    ? `<span class="product-badge product-badge-new">NUEVO</span>`
+    : "";
+  // Texto buscable: lo metemos en data-search para filtrar sin tocar el DOM
+  const searchText = [item.label, item.description, ...(item.sizes || []), ...(item.colors || [])].join(" ").toLowerCase();
 
   const wspLink = `https://wa.me/${wspBase}?text=Hola%20SPORT17%2C%20quiero%20m%C3%A1s%20info%20sobre%20${encodeURIComponent(item.label)}`;
   const imgs = item.images || (item.src ? [item.src] : []);
   const hasGallery = imgs.length > 1;
+
+  const shareBtn = `<button class="product-share-btn" type="button" data-share data-label="${escapeHtml(item.label)}" data-img="${escapeHtml(imgs[0] || "")}" aria-label="Compartir ${escapeHtml(item.label)}">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+      <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="11.49"/>
+    </svg>
+  </button>`;
 
   let mediaHtml;
   if (hasGallery) {
@@ -151,13 +197,15 @@ function renderItem(item) {
         <button class="pgal-btn pgal-prev" type="button" aria-label="Foto anterior">${SVG_PREV}</button>
         <button class="pgal-btn pgal-next" type="button" aria-label="Foto siguiente">${SVG_NEXT}</button>
         <div class="pgal-dots">${dotsHtml}</div>
-        ${stockBadge}
+        <div class="product-badges">${stockBadge}${discountBadge}${newBadge}</div>
+        ${shareBtn}
       </div>`;
   } else {
     mediaHtml = `
       <div class="product-single-media">
         <img src="${escapeHtml(imgs[0] || "")}" alt="${escapeHtml(item.label)}" loading="lazy" decoding="async" />
-        ${stockBadge}
+        <div class="product-badges">${stockBadge}${discountBadge}${newBadge}</div>
+        ${shareBtn}
       </div>`;
   }
 
@@ -165,7 +213,7 @@ function renderItem(item) {
   const buttonLabel = item.outOfStock ? "Consultar reposición" : "Quiero más info";
 
   return `
-    <article class="product-card ${item.outOfStock ? "is-out-of-stock" : ""}">
+    <article class="product-card ${item.outOfStock ? "is-out-of-stock" : ""}" data-search="${escapeHtml(searchText)}">
       ${mediaHtml}
       <div class="product-card-body">
         <strong>${escapeHtml(item.label)}</strong>
@@ -190,16 +238,114 @@ function renderGroup(group) {
     </section>`;
 }
 
+function matchesSearch(item, q) {
+  if (!q) return true;
+  const haystack = [
+    item.label || "",
+    item.description || "",
+    (item.sizes || []).join(" "),
+    (item.colors || []).join(" "),
+  ].join(" ").toLowerCase();
+  return haystack.includes(q);
+}
+
+// Renderiza TODA la colección una sola vez (sin filtrar). El filtro de búsqueda
+// se aplica después con CSS para no tocar el DOM y no romper el scroll.
 function renderCollection(key) {
   const root = collectionRoots[key];
   if (!root) return;
   const groups = collectionData[key] || [];
+
   if (groups.length === 0) {
     root.innerHTML = `<div style="padding:40px; text-align:center; color:rgba(255,255,255,0.6);">Pronto vas a ver productos acá.</div>`;
   } else {
     root.innerHTML = groups.map(renderGroup).join("");
   }
   root.dataset.rendered = "true";
+
+  // Aplicar el filtro de búsqueda actual (si hay) sin destruir nada
+  applySearchFilterToDom();
+}
+
+// Filtro por CSS: marca como .is-hidden las cards que no matchean y oculta
+// los grupos completos que quedan vacíos. Preserva el scroll porque no toca
+// el orden ni la cantidad de nodos del DOM (solo classList).
+function applySearchFilterToDom() {
+  const q = searchQuery.trim().toLowerCase();
+  const countEl = document.getElementById("search-count");
+
+  // Recorrer ambos roots porque el usuario puede tener uno visible
+  let totalMatches = 0;
+  let totalSearched = 0;
+
+  Object.entries(collectionRoots).forEach(([key, root]) => {
+    if (!root) return;
+    const cards = root.querySelectorAll(".product-card[data-search]");
+    const groups = root.querySelectorAll(".product-group");
+
+    cards.forEach((card) => {
+      const text = card.dataset.search || "";
+      const match = !q || text.includes(q);
+      card.classList.toggle("is-hidden", !match);
+      if (root === collectionRoots[activeCollectionKey]) {
+        totalSearched++;
+        if (match) totalMatches++;
+      }
+    });
+
+    // Ocultar grupos enteros sin matches
+    groups.forEach((g) => {
+      const visible = g.querySelector(".product-card:not(.is-hidden)");
+      g.classList.toggle("is-hidden", !visible);
+    });
+  });
+
+  // Mensaje "sin resultados" como overlay (no destructivo)
+  const root = collectionRoots[activeCollectionKey];
+  if (root) {
+    let empty = root.querySelector(".search-empty");
+    const hasGroups = (collectionData[activeCollectionKey] || []).length > 0;
+    if (q && totalMatches === 0 && hasGroups) {
+      if (!empty) {
+        empty = document.createElement("div");
+        empty.className = "search-empty";
+        root.prepend(empty);
+      }
+      empty.innerHTML = `
+        <p style="font-size:1.05rem; margin-bottom:8px;">Sin resultados para "<strong>${escapeHtml(q)}</strong>"</p>
+        <p style="color:rgba(255,255,255,0.5); font-size:0.9rem;">Probá con otro nombre, talle o color.</p>
+      `;
+    } else if (empty) {
+      empty.remove();
+    }
+  }
+
+  // Contador
+  if (countEl) {
+    if (q) {
+      countEl.textContent = totalMatches === 0
+        ? "Sin resultados"
+        : `${totalMatches} producto${totalMatches === 1 ? "" : "s"} encontrado${totalMatches === 1 ? "" : "s"}`;
+    } else {
+      countEl.textContent = "";
+    }
+  }
+}
+
+function renderSkeleton(key) {
+  const root = collectionRoots[key];
+  if (!root) return;
+  const cards = Array.from({ length: 8 }, () => `
+    <div class="skeleton-card">
+      <div class="skeleton-img"></div>
+      <div class="skeleton-body">
+        <div class="skeleton-line"></div>
+        <div class="skeleton-line short"></div>
+        <div class="skeleton-line btn"></div>
+      </div>
+    </div>
+  `).join("");
+  root.innerHTML = `<div class="skeleton-grid">${cards}</div>`;
 }
 
 function renderFeatured() {
@@ -238,7 +384,11 @@ const heroNext = heroCarousel?.querySelector(".carousel-button-next");
 function scrollToSlide(index) {
   const slide = heroSlides[index];
   if (!heroTrack || !slide) return;
-  slide.scrollIntoView({ behavior: "smooth", inline: "start", block: "nearest" });
+  // IMPORTANTE: usamos scrollTo del track horizontal y NO scrollIntoView,
+  // porque scrollIntoView con block:"nearest" también scrollea la página
+  // vertical para mostrar el hero, lo que tira al usuario hacia arriba cada
+  // vez que el autoplay avanza el slide.
+  heroTrack.scrollTo({ left: slide.offsetLeft, behavior: "smooth" });
   heroDots.forEach((dot, dotIndex) => dot.classList.toggle("is-active", dotIndex === index));
 }
 
@@ -263,7 +413,8 @@ function currentSlideIndex() {
 
 const collectionContainer = document.getElementById("collection-container");
 
-function setActiveCollection(key) {
+function setActiveCollection(key, { scroll = true } = {}) {
+  activeCollectionKey = key;
   collectionTabs.forEach((tab) => {
     const active = tab.dataset.collection === key;
     tab.classList.toggle("is-active", active);
@@ -272,10 +423,18 @@ function setActiveCollection(key) {
   collectionPanels.forEach((panel) => {
     panel.style.display = panel.dataset.panel === key ? "grid" : "none";
   });
-  renderCollection(key);
+
+  // Si los datos aún no llegaron, mostrar skeleton
+  const hasData = (collectionData[key] || []).length > 0;
+  if (!hasData) {
+    renderSkeleton(key);
+  } else {
+    renderCollection(key);
+  }
   if (collectionContainer) {
     collectionContainer.style.display = "block";
-    collectionContainer.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Solo scrolleamos al cambiar de colección por click directo, no por búsqueda.
+    if (scroll) collectionContainer.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
 
@@ -296,7 +455,7 @@ document.querySelectorAll('a[href^="#"]').forEach((link) => {
 });
 
 collectionTabs.forEach((tab) => {
-  tab.addEventListener("click", () => setActiveCollection(tab.dataset.collection));
+  tab.addEventListener("click", () => setActiveCollection(tab.dataset.collection, { scroll: true }));
 });
 
 document.querySelectorAll("[data-open-collection]").forEach((link) => {
@@ -412,11 +571,237 @@ lightboxClose?.addEventListener("click", (e) => { e.stopPropagation(); lightbox.
 lightbox?.addEventListener("click", (e) => { if (e.target === lightbox) lightbox.classList.remove("is-open"); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") lightbox?.classList.remove("is-open"); });
 
+// ═══════ Auto-play del hero (pausa al hover / focus / off-screen) ═══════
+
+let heroAutoplay = null;
+function startHeroAutoplay() {
+  if (heroAutoplay || heroSlides.length < 2) return;
+  heroAutoplay = setInterval(() => {
+    if (document.hidden) return;
+    const i = currentSlideIndex();
+    scrollToSlide((i + 1) % heroSlides.length);
+  }, 5500);
+}
+function stopHeroAutoplay() {
+  if (heroAutoplay) { clearInterval(heroAutoplay); heroAutoplay = null; }
+}
+
+if (heroCarousel) {
+  heroCarousel.addEventListener("mouseenter", stopHeroAutoplay);
+  heroCarousel.addEventListener("mouseleave", startHeroAutoplay);
+  heroCarousel.addEventListener("focusin", stopHeroAutoplay);
+  heroCarousel.addEventListener("focusout", startHeroAutoplay);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopHeroAutoplay();
+    else startHeroAutoplay();
+  });
+  // Pausar el autoplay si el usuario interactúa con prev/next/dots
+  [heroPrev, heroNext, ...heroDots].forEach((btn) => {
+    btn?.addEventListener("click", () => {
+      stopHeroAutoplay();
+      setTimeout(startHeroAutoplay, 10000); // reanudar a los 10s
+    });
+  });
+}
+
+// ═══════ Buscador del header (estilo Tiendanube) ═══════
+
+const searchInput = document.getElementById("search-input");
+const searchClear = document.getElementById("search-clear");
+const searchToggle = document.getElementById("header-search-toggle");
+const headerSearch = document.getElementById("header-search");
+
+// Cuenta resultados totales en ambas colecciones
+function countMatchesIn(key, q) {
+  const groups = collectionData[key] || [];
+  return groups.reduce((acc, g) => acc + g.items.filter((it) => matchesSearch(it, q)).length, 0);
+}
+
+function applySearch(value) {
+  searchQuery = value || "";
+  if (searchClear) searchClear.hidden = !searchQuery;
+
+  const q = searchQuery.trim().toLowerCase();
+
+  // Si hay búsqueda y todavía no hay colección activa, abrir la que tenga
+  // más resultados — SIN scroll para no mover al usuario de su lugar.
+  if (q && !activeCollectionKey) {
+    const hombres = countMatchesIn("hombres", q);
+    const mujeres = countMatchesIn("mujeres", q);
+    const target = hombres >= mujeres ? "hombres" : "mujeres";
+    setActiveCollection(target, { scroll: false });
+    return;
+  }
+
+  // Filtro puro por CSS: no toca el DOM, no rompe el scroll.
+  applySearchFilterToDom();
+}
+
+let searchTimer = null;
+searchInput?.addEventListener("input", (e) => {
+  clearTimeout(searchTimer);
+  const v = e.target.value;
+  searchTimer = setTimeout(() => applySearch(v), 120);
+});
+// Evitar que Enter envíe un submit nativo (que provocaría reload + scroll-to-top)
+searchInput?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    applySearch(e.target.value);
+    searchInput.blur(); // en mobile cierra el teclado
+  }
+});
+searchClear?.addEventListener("click", () => {
+  if (searchInput) searchInput.value = "";
+  applySearch("");
+  searchInput?.focus();
+});
+
+// Toggle mobile: abrir/cerrar el input expandible
+searchToggle?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const isOpen = headerSearch?.classList.toggle("is-open");
+  searchToggle.setAttribute("aria-expanded", String(!!isOpen));
+  if (isOpen) {
+    setTimeout(() => searchInput?.focus(), 50);
+  }
+});
+// Cerrar el overlay mobile al tocar fuera
+document.addEventListener("click", (e) => {
+  if (!headerSearch?.classList.contains("is-open")) return;
+  if (headerSearch.contains(e.target)) return;
+  headerSearch.classList.remove("is-open");
+  searchToggle?.setAttribute("aria-expanded", "false");
+});
+// Cerrar con Escape
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (headerSearch?.classList.contains("is-open")) {
+    headerSearch.classList.remove("is-open");
+    searchToggle?.setAttribute("aria-expanded", "false");
+  }
+});
+
+// ═══════ Botón volver arriba ═══════
+
+const backToTopBtn = document.getElementById("back-to-top");
+if (backToTopBtn) {
+  const toggleBackToTop = () => {
+    const show = window.scrollY > 600;
+    backToTopBtn.hidden = !show;
+    backToTopBtn.classList.toggle("is-visible", show);
+  };
+  window.addEventListener("scroll", toggleBackToTop, { passive: true });
+  backToTopBtn.addEventListener("click", () => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
+  toggleBackToTop();
+}
+
+// ═══════ WhatsApp FAB: actualizar número desde settings ═══════
+
+function syncWhatsappLinks() {
+  const number = storeSettings.whatsapp || STORE_CONFIG.whatsappNumber;
+  const text = encodeURIComponent("Hola SPORT17, quiero ver la colección");
+  const url = `https://wa.me/${number}?text=${text}`;
+  document.querySelectorAll(".whatsapp-fab, .whatsapp-pill, .footer-social-wsp, .footer-col-wsp").forEach((a) => {
+    if (a.tagName === "A") a.href = url;
+  });
+}
+
+// ═══════ Banner promocional dinámico ═══════
+
+function renderPromoBanner() {
+  const banner = document.getElementById("promo-banner");
+  const text = document.getElementById("promo-banner-text");
+  if (!banner || !text) return;
+  const msg = (storeSettings.promoBanner || "").trim();
+  // Si el usuario lo cerró, no mostrar de nuevo (en esta sesión)
+  const dismissedKey = "sport17_promo_dismissed";
+  const dismissed = sessionStorage.getItem(dismissedKey);
+  if (!msg || dismissed === msg) {
+    banner.hidden = true;
+    return;
+  }
+  text.textContent = msg;
+  banner.hidden = false;
+  const closeBtn = banner.querySelector(".promo-banner-close");
+  closeBtn?.addEventListener("click", () => {
+    banner.hidden = true;
+    sessionStorage.setItem(dismissedKey, msg);
+  }, { once: true });
+}
+
+// ═══════ Compartir producto (Web Share API + copy fallback) ═══════
+
+async function shareProduct(label, imgUrl) {
+  const shareData = {
+    title: `SPORT17 — ${label}`,
+    text: `Mirá este producto de SPORT17: ${label}`,
+    url: window.location.origin || "https://sport17.com.ar/",
+  };
+  try {
+    if (navigator.share) {
+      await navigator.share(shareData);
+      return;
+    }
+  } catch (err) {
+    if (err?.name === "AbortError") return; // usuario canceló
+  }
+  // Fallback: copiar URL + abrir WhatsApp con el mensaje
+  try {
+    await navigator.clipboard.writeText(`${shareData.text} — ${shareData.url}`);
+    showToast("Link copiado al portapapeles");
+  } catch {
+    const wspBase = storeSettings.whatsapp || STORE_CONFIG.whatsappNumber;
+    window.open(`https://wa.me/${wspBase}?text=${encodeURIComponent(shareData.text + " " + shareData.url)}`, "_blank");
+  }
+}
+
+// Toast simple para feedback de share
+function showToast(message) {
+  let toast = document.getElementById("simple-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "simple-toast";
+    toast.style.cssText = "position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(20px);background:#05070b;color:#fff;padding:12px 20px;border-radius:12px;font-size:0.9rem;font-weight:600;border:1px solid rgba(255,255,255,0.12);box-shadow:0 10px 30px rgba(0,0,0,0.5);z-index:100;opacity:0;transition:opacity 220ms ease, transform 220ms ease;pointer-events:none;";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  requestAnimationFrame(() => {
+    toast.style.opacity = "1";
+    toast.style.transform = "translateX(-50%) translateY(0)";
+  });
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => {
+    toast.style.opacity = "0";
+    toast.style.transform = "translateX(-50%) translateY(20px)";
+  }, 2200);
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-share]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  shareProduct(btn.dataset.label || "", btn.dataset.img || "");
+});
+
 // ═══════ Boot ═══════
 
 (async () => {
   try {
+    // Mostrar skeleton inmediatamente en la grilla activa si hay
+    collectionTabs.forEach((tab) => {
+      if (tab.classList.contains("is-active")) {
+        renderSkeleton(tab.dataset.collection);
+      }
+    });
+
     await loadStoreSettings();
+    syncWhatsappLinks();
+    renderPromoBanner();
+
     await loadCategoriesAndProducts();
     // pre-renderizar destacados en home
     renderFeatured();
@@ -427,6 +812,11 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") lightbox?.
         renderCollection(tab.dataset.collection);
       }
     });
+    // Si ya hay una colección activa por click previo, re-render con datos reales
+    if (activeCollectionKey) renderCollection(activeCollectionKey);
+
+    // Iniciar autoplay del hero después de cargar
+    startHeroAutoplay();
   } catch (err) {
     console.error("Error cargando productos:", err);
     // si Firestore falla, mostramos un mensaje suave
@@ -436,5 +826,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") lightbox?.
         <p>Estamos actualizando el catálogo. Volvé en unos minutos o consultanos por WhatsApp.</p>
       </div>`;
     });
+    // Aún sin datos, el hero debe andar
+    startHeroAutoplay();
   }
 })();

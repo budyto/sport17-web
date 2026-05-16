@@ -310,7 +310,6 @@ function historyRow(h) {
       </td>
     </tr>`;
 }
-}
 
 // Reconoce el primer sheet con cabecera real ("ID" / "Nombre" / "Precio").
 function pickCatalogSheet(wb) {
@@ -448,49 +447,227 @@ function list(v) {
   return String(v).split(/[,;|]/).map((s) => s.trim()).filter(Boolean);
 }
 
+// Mapeo de categorías plural → singular para imitar el formato del Excel
+// maestro (ej: "Camisetas" en Firestore → "Camiseta" en el export).
+function categoryToSingular(catName) {
+  if (!catName) return "";
+  return catName
+    .replace(/ Mujer$/i, "")          // "Camperas Mujer" → "Camperas"
+    .replace(/^Camisetas?$/i, "Camiseta")
+    .replace(/^Camperas?$/i, "Campera")
+    .replace(/^Conjuntos?$/i, "Conjunto")
+    .replace(/^Pantalones?$/i, "Pantalon")
+    .replace(/^Zapatillas?$/i, "Zapatilla")
+    .replace(/^Perfumes? (Hombres|Mujeres)$/i, "Perfume")
+    .replace(/^Perfumes?$/i, "Perfume")
+    .replace(/^Buzos y Sweaters?$/i, "Buzo");
+}
+
+// Genera el ID legible para el Excel: usa p.sku si existe, sino "P001"..."P999"
+// según el orden de aparición. Esto le da continuidad al Excel de control.
+function generateExportId(p, index) {
+  if (p.sku && p.sku.trim()) return p.sku.trim();
+  return "P" + String(index + 1).padStart(3, "0");
+}
+
+// Formatea un timestamp de Firestore o Date a "DD/MM/YYYY HH:mm" (estilo AR).
+function formatTimestamp(ts) {
+  if (!ts) return "";
+  const d = ts.toDate ? ts.toDate() : (ts instanceof Date ? ts : new Date(ts));
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Normaliza precios que quedaron guardados en miles (ej: 45 → 45000).
+function normalizePriceValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return n;
+  return n < 1000 ? n * 1000 : n;
+}
+
+// Devuelve la URL de la imagen principal del producto (o vacío si no tiene).
+function getMainImageUrl(p) {
+  const imgs = p.images || [];
+  if (imgs.length === 0) return "";
+  const main = imgs.find((i) => i.isMain) || imgs[0];
+  return main?.url || "";
+}
+
 function exportFile(products, catById, format) {
-  // Formato espejo del Excel de control de stock: ID = sku, Género viene del
-  // parent de la categoría, Categoría = nombre legible. Mantenemos una columna
-  // "ID Firestore" oculta al final para que el import detecte el doc exacto.
-  const rows = products.map((p) => {
-    const cat = catById(p.categoryId);
-    const genero = cat?.parent === "hombres" ? "Hombre" : cat?.parent === "mujeres" ? "Mujer" : "";
-    const precio = Number(p.price ?? 0);
-    const costo = Number(p.cost ?? 0);
-    const ganancia = costo > 0 ? precio - costo : "";
-    const gananciaPct = costo > 0 ? Math.round(((precio - costo) / costo) * 100) : "";
-    const stock = p.stock ?? 0;
-    const alerta = stock <= 0 ? "SIN STOCK" : stock <= 3 ? "BAJO" : "OK";
-    return {
-      "ID": p.sku || "",
-      "Genero": genero,
-      "Categoria": cat?.name?.replace(/^(Camisetas?|Camperas?|Conjuntos?|Pantalones?|Zapatillas|Perfumes?|Buzos y Sweaters)( Mujer)?$/i, (m) => m.replace(/ Mujer$/i, "")) || "",
-      "Nombre del Producto": p.name || "",
-      "Precio ($)": p.price ?? "",
-      "Costo ($)": p.cost ?? "",
-      "Ganancia ($)": ganancia,
-      "Ganancia (%)": gananciaPct,
-      "Talles Disponibles": (p.sizes || []).join(","),
-      "Stock": stock,
-      "Alerta Stock": alerta,
-      "Notas": p.description || "",
-      "Activo": p.active ? "Si" : "No",
-      "Destacado": p.featured ? "Si" : "No",
-      "ID Firestore": p.id,
-    };
+  // Ordenamos productos por género y categoría para que el Excel salga prolijo,
+  // igual que el Sheets maestro: primero Hombres, después Mujeres.
+  const sortedProducts = [...products].sort((a, b) => {
+    const catA = catById(a.categoryId);
+    const catB = catById(b.categoryId);
+    const parentA = catA?.parent === "hombres" ? 0 : catA?.parent === "mujeres" ? 1 : 2;
+    const parentB = catB?.parent === "hombres" ? 0 : catB?.parent === "mujeres" ? 1 : 2;
+    if (parentA !== parentB) return parentA - parentB;
+    const orderA = catA?.order ?? 999;
+    const orderB = catB?.order ?? 999;
+    if (orderA !== orderB) return orderA - orderB;
+    return (a.name || "").localeCompare(b.name || "");
   });
 
-  const ws = XLSX.utils.json_to_sheet(rows);
-  ws["!cols"] = [
-    { wch: 8 }, { wch: 10 }, { wch: 14 }, { wch: 38 }, { wch: 12 }, { wch: 12 },
-    { wch: 14 }, { wch: 12 }, { wch: 22 }, { wch: 8 }, { wch: 12 }, { wch: 40 },
-    { wch: 8 }, { wch: 10 }, { wch: 22 },
+  // Cabecera completa: 18 columnas comerciales + 3 metadatos para import inverso.
+  const headers = [
+    "ID",
+    "Genero",
+    "Categoria",
+    "Nombre del Producto",
+    "Colores",
+    "Talles Disponibles",
+    "Precio ($)",
+    "Precio Anterior ($)",
+    "% Descuento",
+    "Costo ($)",
+    "Ganancia ($)",
+    "Ganancia (%)",
+    "Stock",
+    "Alerta Stock",
+    "Imagen Principal",
+    "Notas",
+    "Creado",
+    "Ultimo Cambio",
+    // Metadatos para import (al final)
+    "Activo",
+    "Destacado",
+    "ID Firestore",
   ];
+
+  const dataRows = sortedProducts.map((p, i) => {
+    const cat = catById(p.categoryId);
+    const genero = cat?.parent === "hombres" ? "Hombre" : cat?.parent === "mujeres" ? "Mujer" : "";
+    const precio = normalizePriceValue(p.price);
+    const precioOld = normalizePriceValue(p.priceOld);
+    const costo = normalizePriceValue(p.cost);
+    // % de descuento si hay precio anterior mayor al actual
+    const descuentoPct = (precioOld > 0 && precio > 0 && precioOld > precio)
+      ? Math.round((1 - precio / precioOld) * 100)
+      : "";
+    const ganancia = costo > 0 && precio > 0 ? precio - costo : "";
+    const gananciaPct = costo > 0 ? Math.round(((precio - costo) / costo) * 100) : "";
+    const stock = p.stock ?? 0;
+    const alerta = stock <= 0 ? "AGOTADO" : stock <= 3 ? "BAJO" : "OK";
+    return [
+      generateExportId(p, i),
+      genero,
+      categoryToSingular(cat?.name),
+      p.name || "",
+      (p.colors || []).join(","),
+      (p.sizes || []).join(","),
+      precio || "",
+      precioOld || "",
+      descuentoPct === "" ? "" : descuentoPct,
+      costo || "",
+      ganancia,
+      gananciaPct,
+      stock,
+      alerta,
+      getMainImageUrl(p),
+      p.description || "",
+      formatTimestamp(p.createdAt),
+      formatTimestamp(p.updatedAt),
+      p.active ? "Si" : "No",
+      p.featured ? "Si" : "No",
+      p.id,
+    ];
+  });
+
+  // Construimos la hoja como array-of-arrays para tener control fino sobre
+  // tipos de celda y formato (no es lo mismo que json_to_sheet).
+  const aoa = [headers, ...dataRows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  // Formatos por columna (las letras corresponden a la nueva estructura de 21 columnas):
+  //   G=Precio  H=Precio Anterior  I=% Descuento  J=Costo  K=Ganancia $  L=Ganancia %  M=Stock
+  const moneyCols = ["G", "H", "J", "K"];
+  const pctCols = ["I", "L"];
+  const numCols = ["M"];
+  for (let r = 2; r <= aoa.length; r++) {
+    moneyCols.forEach((col) => {
+      const cell = ws[`${col}${r}`];
+      if (cell && typeof cell.v === "number") { cell.t = "n"; cell.z = '"$"#,##0'; }
+    });
+    pctCols.forEach((col) => {
+      const cell = ws[`${col}${r}`];
+      if (cell && typeof cell.v === "number") { cell.t = "n"; cell.z = '0"%"'; }
+    });
+    numCols.forEach((col) => {
+      const cell = ws[`${col}${r}`];
+      if (cell && typeof cell.v === "number") { cell.t = "n"; }
+    });
+  }
+
+  // Anchos de columna optimizados (21 columnas)
+  ws["!cols"] = [
+    { wch: 8 },   // ID
+    { wch: 10 },  // Genero
+    { wch: 14 },  // Categoria
+    { wch: 42 },  // Nombre del Producto
+    { wch: 24 },  // Colores
+    { wch: 22 },  // Talles
+    { wch: 14 },  // Precio
+    { wch: 16 },  // Precio Anterior
+    { wch: 12 },  // % Descuento
+    { wch: 14 },  // Costo
+    { wch: 14 },  // Ganancia $
+    { wch: 14 },  // Ganancia %
+    { wch: 8 },   // Stock
+    { wch: 14 },  // Alerta Stock
+    { wch: 50 },  // Imagen Principal (URL)
+    { wch: 36 },  // Notas
+    { wch: 18 },  // Creado
+    { wch: 18 },  // Ultimo Cambio
+    { wch: 8 },   // Activo
+    { wch: 11 },  // Destacado
+    { wch: 26 },  // ID Firestore
+  ];
+
+  // Freeze pane: primera fila siempre visible al scrollear
+  ws["!freeze"] = { xSplit: 0, ySplit: 1, topLeftCell: "A2", activePane: "bottomLeft", state: "frozen" };
+  // Para xlsx, la propiedad oficial es "!freeze" o sheetView; usamos el método actual:
+  if (!ws["!views"]) ws["!views"] = [];
+  ws["!views"][0] = { state: "frozen", ySplit: 1 };
+
+  // Autofiltro en toda la cabecera (Excel agrega los dropdowns automáticamente)
+  ws["!autofilter"] = { ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}1` };
+
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "CATALOGO");
+
+  // Hoja de "Ayuda" con descripción de cada columna y los valores válidos
+  const helpRows = [
+    ["Columna", "Qué es", "Valores válidos", "Editable en import"],
+    ["ID", "Código corto del producto (ej: P001)", "Texto libre. Si está vacío en un import nuevo, se autogenera.", "Sí"],
+    ["Genero", "Sección padre", "Hombre | Mujer", "Sí"],
+    ["Categoria", "Categoría del producto", "Camiseta, Campera, Conjunto, Pantalon, Zapatilla, Perfume, Buzo", "Sí"],
+    ["Nombre del Producto", "Nombre comercial", "Texto libre", "Sí"],
+    ["Colores", "Colores disponibles separados por coma", 'Ej: "Negro,Blanco,Rojo"', "Sí"],
+    ["Talles Disponibles", "Talles separados por coma", 'Ej: "S,M,L,XL" o "40,41,42"', "Sí"],
+    ["Precio ($)", "Precio de venta en pesos", "Número entero (ej: 45000)", "Sí"],
+    ["Precio Anterior ($)", "Precio antes de la oferta. Se muestra tachado en la web.", "Número entero. Vacío si no hay oferta.", "Sí"],
+    ["% Descuento", "Calculado automáticamente si hay Precio Anterior", "Calculado: (1 − Precio/Precio Anterior) × 100", "No"],
+    ["Costo ($)", "Costo interno (no se muestra al público)", "Número entero (vacío si no se quiere registrar)", "Sí"],
+    ["Ganancia ($)", "Calculado automáticamente: Precio − Costo", "Calculado", "No"],
+    ["Ganancia (%)", "Calculado automáticamente: (Precio − Costo) / Costo × 100", "Calculado", "No"],
+    ["Stock", "Unidades disponibles", "Número entero", "Sí"],
+    ["Alerta Stock", "Calculado automáticamente", "OK (>3) | BAJO (1-3) | AGOTADO (0)", "No"],
+    ["Imagen Principal", "URL de la imagen principal", "URL (Firebase Storage o ruta relativa)", "No editar manualmente. Subir desde el panel."],
+    ["Notas", "Descripción interna del producto", "Texto libre", "Sí"],
+    ["Creado", "Fecha de creación del producto", "DD/MM/YYYY HH:mm", "No"],
+    ["Ultimo Cambio", "Última vez que se modificó", "DD/MM/YYYY HH:mm", "No"],
+    ["Activo", "Si se muestra en la tienda pública", "Si | No", "Sí"],
+    ["Destacado", "Si aparece en la sección Destacados del home", "Si | No", "Sí"],
+    ["ID Firestore", "ID interno (no tocar)", "Auto", "No — si lo borrás se crea un producto nuevo en el import"],
+  ];
+  const wsHelp = XLSX.utils.aoa_to_sheet(helpRows);
+  wsHelp["!cols"] = [{ wch: 22 }, { wch: 48 }, { wch: 42 }, { wch: 18 }];
+  wsHelp["!views"] = [{ state: "frozen", ySplit: 1 }];
+  XLSX.utils.book_append_sheet(wb, wsHelp, "AYUDA");
 
   const stamp = new Date().toISOString().slice(0, 10);
   const filename = `sport17_catalogo_${stamp}.${format}`;
   XLSX.writeFile(wb, filename, { bookType: format });
-  toast("Catálogo descargado");
+  toast(`Catálogo descargado (${sortedProducts.length} productos)`);
 }
