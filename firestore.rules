@@ -24,6 +24,13 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
 
+    // Secciones (Hombres, Mujeres, Tecnología, etc.): nivel padre de categorías.
+    // Público lee para renderizar la home, admin escribe para crear/editar.
+    match /sections/{sectionId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
     // Configuración global de la tienda (textos del hero, redes, etc.)
     match /settings/{document=**} {
       allow read: if true;
@@ -38,6 +45,17 @@ service cloud.firestore {
     // Historial de imports (snapshots para deshacer). Solo admin.
     match /import-history/{document=**} {
       allow read, write: if isAdmin();
+    }
+
+    // Newsletter: cualquiera puede SUMARSE (create) con un email valido y
+    // datos minimos. Solo admin puede leer / borrar.
+    match /newsletter/{document} {
+      allow read, delete: if isAdmin();
+      allow create: if request.resource.data.email is string
+        && request.resource.data.email.matches('^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$')
+        && request.resource.data.email.size() < 200
+        && request.resource.data.keys().hasOnly(['email', 'source', 'createdAt']);
+      allow update: if false;
     }
   }
 }

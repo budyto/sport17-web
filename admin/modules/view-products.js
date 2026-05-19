@@ -310,15 +310,24 @@ export async function renderProductForm(outlet, productId) {
       <div class="card" style="grid-column: 1 / -1;">
         <div class="card-head"><h2>Variantes</h2></div>
         <div class="form-grid">
-          <div class="form-row">
-            <span class="form-label">Talles</span>
-            <div class="tag-input" id="tag-sizes" data-tag-target="sizes"></div>
-            <span class="form-hint">Apretá Enter para agregar cada talle (S, M, L, 38, 40...).</span>
+          <div class="form-row full">
+            <span class="form-label">Talles disponibles</span>
+            <div class="size-picker" id="size-picker"></div>
+            <div class="size-picker-actions" style="margin-top: 8px;">
+              <input id="size-custom-input" class="form-input" type="text" placeholder="Otro talle... (ej: 38, XXL, único)" style="max-width:240px; display:inline-block;" />
+              <button type="button" class="btn btn-secondary btn-sm" id="size-custom-add">+ Agregar</button>
+            </div>
+            <span class="form-hint">Hacé click en los talles disponibles. Podés agregar uno personalizado abajo.</span>
           </div>
-          <div class="form-row">
-            <span class="form-label">Colores</span>
-            <div class="tag-input" id="tag-colors" data-tag-target="colors"></div>
-            <span class="form-hint">Apretá Enter para agregar cada color.</span>
+          <div class="form-row full">
+            <span class="form-label">Colores disponibles</span>
+            <div class="color-picker" id="color-picker"></div>
+            <div class="color-picker-actions" style="margin-top: 8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <input id="color-custom-name" class="form-input" type="text" placeholder="Nombre del color (ej: Mostaza)" style="max-width:200px;" />
+              <input id="color-custom-hex" type="color" value="#888888" style="width:42px; height:38px; padding:0; border:1px solid var(--line); border-radius:8px; cursor:pointer;" />
+              <button type="button" class="btn btn-secondary btn-sm" id="color-custom-add">+ Agregar color</button>
+            </div>
+            <span class="form-hint">Cliqueá los colores que tiene el producto. Si falta uno, agregalo con su tono real.</span>
           </div>
         </div>
       </div>
@@ -340,8 +349,8 @@ export async function renderProductForm(outlet, productId) {
   `;
 
   // ── Tag inputs ──
-  setupTagInput($("#tag-sizes"), sizes);
-  setupTagInput($("#tag-colors"), colors);
+  setupSizesPicker(sizes);
+  setupColorsPicker(colors);
 
   // ── Imágenes ──
   const uploader = $("#uploader");
@@ -499,37 +508,207 @@ export async function renderProductForm(outlet, productId) {
   };
 }
 
-function setupTagInput(container, list) {
+// ─── Picker visual de talles ─────────────────────────────────────────────────
+// Presets agrupados por tipo (ropa / calzado / único). Cliqueando un preset
+// se toggleA. Hay un campo aparte abajo para agregar uno custom.
+const SIZE_PRESETS = {
+  Ropa: ["XS", "S", "M", "L", "XL", "XXL", "XXXL"],
+  Calzado: ["36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46"],
+  Otros: ["Único", "Talle 1", "Talle 2", "Talle 3", "Talle 4"],
+};
+
+function setupSizesPicker(list) {
+  const container = $("#size-picker");
+  const customInput = $("#size-custom-input");
+  const customAdd = $("#size-custom-add");
+
   function paint() {
     container.innerHTML = "";
-    list.forEach((tag, i) => {
-      const chip = el("span", { class: "tag-chip", text: tag });
-      const btn = el("button", { type: "button", text: "×", onClick: () => { list.splice(i, 1); paint(); } });
-      chip.appendChild(btn);
-      container.appendChild(chip);
-    });
-    const input = el("input", { type: "text", placeholder: list.length ? "" : "Agregar..." });
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === ",") {
-        e.preventDefault();
-        const val = input.value.trim();
-        if (val) {
-          list.push(val);
+    // Grupos preset
+    for (const [groupName, sizes] of Object.entries(SIZE_PRESETS)) {
+      const group = el("div", { class: "size-group" });
+      group.appendChild(el("span", { class: "size-group-label", text: groupName }));
+      const chips = el("div", { class: "size-chips" });
+      for (const s of sizes) {
+        const active = list.includes(s);
+        const btn = el("button", { type: "button", class: `size-chip${active ? " is-active" : ""}`, text: s });
+        btn.onclick = () => {
+          const idx = list.indexOf(s);
+          if (idx >= 0) list.splice(idx, 1);
+          else list.push(s);
           paint();
-        }
-      } else if (e.key === "Backspace" && !input.value && list.length) {
-        list.pop();
-        paint();
+        };
+        chips.appendChild(btn);
       }
-    });
-    input.addEventListener("blur", () => {
-      const val = input.value.trim();
-      if (val) { list.push(val); paint(); }
-    });
-    container.appendChild(input);
+      group.appendChild(chips);
+      container.appendChild(group);
+    }
+    // Sección de "Tus talles personalizados" si hay alguno fuera de presets
+    const allPreset = Object.values(SIZE_PRESETS).flat();
+    const custom = list.filter((s) => !allPreset.includes(s));
+    if (custom.length > 0) {
+      const group = el("div", { class: "size-group" });
+      group.appendChild(el("span", { class: "size-group-label", text: "Personalizados" }));
+      const chips = el("div", { class: "size-chips" });
+      for (const s of custom) {
+        const chip = el("button", { type: "button", class: "size-chip is-active is-custom", text: s });
+        chip.onclick = () => {
+          const idx = list.indexOf(s);
+          if (idx >= 0) { list.splice(idx, 1); paint(); }
+        };
+        chips.appendChild(chip);
+      }
+      group.appendChild(chips);
+      container.appendChild(group);
+    }
   }
-  container.addEventListener("click", () => container.querySelector("input")?.focus());
+
+  customAdd.onclick = () => {
+    const val = customInput.value.trim();
+    if (!val) return;
+    if (!list.includes(val)) list.push(val);
+    customInput.value = "";
+    paint();
+  };
+  customInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      customAdd.click();
+    }
+  });
+
   paint();
+}
+
+// ─── Picker visual de colores (con swatches del color real) ─────────────────
+// Lista de colores comunes con su hex. El cliente puede agregar custom con un
+// color picker nativo + nombre.
+const COLOR_PRESETS = [
+  { name: "Negro", hex: "#000000" },
+  { name: "Blanco", hex: "#FFFFFF" },
+  { name: "Gris", hex: "#9CA3AF" },
+  { name: "Rojo", hex: "#DC2626" },
+  { name: "Azul", hex: "#1D4ED8" },
+  { name: "Celeste", hex: "#38BDF8" },
+  { name: "Verde", hex: "#16A34A" },
+  { name: "Amarillo", hex: "#FACC15" },
+  { name: "Naranja", hex: "#F97316" },
+  { name: "Rosa", hex: "#EC4899" },
+  { name: "Violeta", hex: "#7C3AED" },
+  { name: "Marrón", hex: "#78350F" },
+  { name: "Beige", hex: "#D6CFC0" },
+  { name: "Bordó", hex: "#7F1D1D" },
+  { name: "Animal Print", hex: "#C2925F" },
+];
+
+function setupColorsPicker(list) {
+  const container = $("#color-picker");
+  const nameInput = $("#color-custom-name");
+  const hexInput = $("#color-custom-hex");
+  const addBtn = $("#color-custom-add");
+
+  // El estado interno guarda los colores como string (nombre legible) — mantiene
+  // backward compat con el modelo (`colors: string[]`). Los hex viven en un mapa
+  // local solo para mostrar el swatch.
+  function findHex(name) {
+    const preset = COLOR_PRESETS.find((c) => c.name.toLowerCase() === String(name).toLowerCase());
+    return preset?.hex || colorNameToHex(name);
+  }
+
+  function paint() {
+    container.innerHTML = "";
+
+    // Sección de presets
+    const presetWrap = el("div", { class: "color-swatches" });
+    for (const c of COLOR_PRESETS) {
+      const active = list.some((n) => n.toLowerCase() === c.name.toLowerCase());
+      const swatch = el("button", {
+        type: "button",
+        class: `color-swatch${active ? " is-active" : ""}`,
+        title: c.name,
+        "aria-pressed": String(active),
+        "aria-label": c.name,
+      });
+      swatch.style.setProperty("--swatch-color", c.hex);
+      swatch.innerHTML = `
+        <span class="color-swatch-dot" style="background:${c.hex};"></span>
+        <span class="color-swatch-name">${c.name}</span>
+      `;
+      swatch.onclick = () => {
+        const idx = list.findIndex((n) => n.toLowerCase() === c.name.toLowerCase());
+        if (idx >= 0) list.splice(idx, 1);
+        else list.push(c.name);
+        paint();
+      };
+      presetWrap.appendChild(swatch);
+    }
+    container.appendChild(presetWrap);
+
+    // Sección de personalizados (los que están en list pero no en presets)
+    const presetNames = new Set(COLOR_PRESETS.map((c) => c.name.toLowerCase()));
+    const customColors = list.filter((n) => !presetNames.has(String(n).toLowerCase()));
+    if (customColors.length > 0) {
+      const label = el("div", { class: "color-group-label", text: "Personalizados" });
+      container.appendChild(label);
+      const customWrap = el("div", { class: "color-swatches" });
+      for (const name of customColors) {
+        const hex = findHex(name);
+        const swatch = el("button", {
+          type: "button",
+          class: "color-swatch is-active is-custom",
+          title: `${name} (click para quitar)`,
+        });
+        swatch.innerHTML = `
+          <span class="color-swatch-dot" style="background:${hex};"></span>
+          <span class="color-swatch-name">${name}</span>
+        `;
+        swatch.onclick = () => {
+          const idx = list.indexOf(name);
+          if (idx >= 0) { list.splice(idx, 1); paint(); }
+        };
+        customWrap.appendChild(swatch);
+      }
+      container.appendChild(customWrap);
+    }
+  }
+
+  addBtn.onclick = () => {
+    const name = nameInput.value.trim();
+    if (!name) return;
+    if (!list.some((n) => n.toLowerCase() === name.toLowerCase())) {
+      list.push(name);
+    }
+    nameInput.value = "";
+    hexInput.value = "#888888";
+    paint();
+  };
+  nameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addBtn.click(); }
+  });
+
+  paint();
+}
+
+// Intenta mapear un nombre de color en español al hex aprox. (fallback gris).
+function colorNameToHex(name) {
+  const map = {
+    rojo: "#DC2626", roja: "#DC2626",
+    azul: "#1D4ED8",
+    verde: "#16A34A",
+    negro: "#000000",
+    blanco: "#FFFFFF",
+    gris: "#9CA3AF",
+    amarillo: "#FACC15",
+    naranja: "#F97316",
+    rosa: "#EC4899",
+    violeta: "#7C3AED", morado: "#7C3AED",
+    marron: "#78350F", marrón: "#78350F",
+    beige: "#D6CFC0",
+    celeste: "#38BDF8",
+    bordó: "#7F1D1D", bordo: "#7F1D1D",
+  };
+  const key = String(name).toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  return map[key] || "#888888";
 }
 
 function cleanImages(arr) {

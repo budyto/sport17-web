@@ -6,6 +6,7 @@ import { toast } from "./modules/ui.js";
 import { renderDashboard } from "./modules/view-dashboard.js";
 import { renderProductList, renderProductForm } from "./modules/view-products.js";
 import { renderCategories } from "./modules/view-categories.js";
+import { renderSections } from "./modules/view-sections.js";
 import { renderStock } from "./modules/view-stock.js";
 import { renderImport } from "./modules/view-import.js";
 import { renderSettings } from "./modules/view-settings.js";
@@ -17,6 +18,7 @@ const routes = [
   { match: /^#\/products\/new$/, title: "Nuevo producto", render: (outlet) => renderProductForm(outlet, "new") },
   { match: /^#\/products\/(.+)$/, title: "Editar producto", render: (outlet, id) => renderProductForm(outlet, id) },
   { match: /^#\/categories$/, title: "Categorías", render: (outlet) => renderCategories(outlet) },
+  { match: /^#\/sections$/, title: "Secciones", render: (outlet) => renderSections(outlet) },
   { match: /^#\/stock$/, title: "Stock y precios", render: (outlet) => renderStock(outlet) },
   { match: /^#\/import$/, title: "Importar / Exportar", render: (outlet) => renderImport(outlet) },
   { match: /^#\/settings$/, title: "Configuración", render: (outlet) => renderSettings(outlet) },
@@ -25,6 +27,7 @@ const routes = [
 function routeKey(hash) {
   if (hash.startsWith("#/products/") && hash !== "#/products/new") return "products";
   if (hash.startsWith("#/products")) return "products";
+  if (hash.startsWith("#/sections")) return "sections";
   if (hash.startsWith("#/categories")) return "categories";
   if (hash.startsWith("#/stock")) return "stock";
   if (hash.startsWith("#/import")) return "import";
@@ -34,7 +37,7 @@ function routeKey(hash) {
 
 function navigate() {
   const hash = window.location.hash || "#/dashboard";
-  const outlet = $("#route-outlet");
+  let outlet = $("#route-outlet");
   if (!outlet) return;
 
   const match = routes.find((r) => r.match.test(hash));
@@ -54,7 +57,15 @@ function navigate() {
   // cerrar sidebar en mobile
   $("#sidebar")?.classList.remove("is-open");
 
-  outlet.innerHTML = "";
+  // CRÍTICO: reemplazar el outlet por un clon vacío para descartar todos los
+  // event listeners que las vistas anteriores hayan registrado sobre él.
+  // Sin esto, view-categories sigue capturando clicks de [data-edit] que
+  // ahora pertenecen a view-sections u otras vistas. Cada vista debe registrar
+  // sus listeners después de que su `render(outlet)` empiece.
+  const fresh = outlet.cloneNode(false);
+  outlet.parentNode.replaceChild(fresh, outlet);
+  outlet = fresh;
+
   Promise.resolve(match.render(outlet, m[1])).catch((err) => {
     console.error(err);
     outlet.innerHTML = `<div class="alert alert-danger" style="margin: 20px;">Error: ${err.message}</div>`;

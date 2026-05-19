@@ -6,6 +6,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getFirestore, collection, getDocs, query, where, orderBy, doc, getDoc,
+  addDoc, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig, STORE_CONFIG } from "./admin/firebase-config.js";
 
@@ -17,20 +18,24 @@ const db = getFirestore(app);
 const menuButton = document.querySelector(".menu-button");
 const siteNav = document.querySelector(".site-nav");
 
-const collectionTabs = [...document.querySelectorAll("[data-collection]")];
-const collectionPanels = [...document.querySelectorAll("[data-panel]")];
-const collectionRoots = {
-  hombres: document.getElementById("hombres-grid"),
-  mujeres: document.getElementById("mujeres-grid"),
-};
+// Estos tres se llenan dinámicamente cuando carguemos las secciones de Firestore.
+// Antes eran arrays/objetos estáticos con "hombres" y "mujeres" hardcoded.
+let collectionTabs = [];
+let collectionPanels = [];
+const collectionRoots = {};
 
 // ═══════ Búsqueda en vivo ═══════
 let searchQuery = "";
 let activeCollectionKey = null;
 
+// ═══════ Secciones (dinámicas desde Firestore) ═══════
+let sectionsList = []; // [{ id, name, description, coverImage, active, order }]
+let categoriesList = []; // [{ id, name, parent, order, active }] — necesarias para mega-menu y footer dividido
+let productsLoaded = false; // true cuando ya terminamos de pedir productos a Firestore
+
 // ═══════ Estado en memoria ═══════
 let storeSettings = { hideOutOfStock: false, whatsapp: STORE_CONFIG.whatsappNumber, lowStock: STORE_CONFIG.lowStockThreshold };
-const collectionData = { hombres: [], mujeres: [] };
+const collectionData = {}; // { [sectionSlug]: [{ title, items }] }
 let featuredProducts = [];
 
 // ═══════ SVGs ═══════
@@ -66,6 +71,28 @@ async function loadStoreSettings() {
   }
 }
 
+async function loadSections() {
+  // Trae las secciones activas, ordenadas por `order`. Si no hay ninguna en la
+  // BD usamos defaults para que la home no quede vacía si el admin todavía no
+  // corrió la migración (ensureDefaultSections).
+  try {
+    const snap = await getDocs(collection(db, "sections"));
+    sectionsList = snap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((s) => s.active !== false)
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  } catch (err) {
+    console.warn("No se pudieron cargar secciones:", err);
+    sectionsList = [];
+  }
+  if (sectionsList.length === 0) {
+    sectionsList = [
+      { id: "hombres", name: "Hombres", description: "Conjuntos · Camperas · Zapatillas · Perfumes", coverImage: { url: "./men.webp" }, order: 0 },
+      { id: "mujeres", name: "Mujeres", description: "Conjuntos · Camperas · Buzos · Perfumes", coverImage: { url: "./women.webp" }, order: 1 },
+    ];
+  }
+}
+
 async function loadCategoriesAndProducts() {
   // Categorías activas
   const catSnap = await getDocs(collection(db, "categories"));
@@ -73,6 +100,7 @@ async function loadCategoriesAndProducts() {
     .map((d) => ({ id: d.id, ...d.data() }))
     .filter((c) => c.active !== false)
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  categoriesList = categories; // exponer al scope global para mega-menu y footer
 
   // Productos activos
   const prodSnap = await getDocs(collection(db, "products"));
@@ -81,25 +109,214 @@ async function loadCategoriesAndProducts() {
     .filter((p) => p.active !== false)
     .filter((p) => !storeSettings.hideOutOfStock || (p.stock ?? 0) > 0);
 
-  // Agrupar por sección padre y categoría
-  const sections = { hombres: [], mujeres: [] };
+  // Inicializar buckets para cada sección activa (sin esto, secciones nuevas
+  // sin categorías quedarían sin entrada en collectionData).
+  for (const s of sectionsList) {
+    collectionData[s.id] = [];
+  }
+
+  // Agrupar por sección padre y categoría.
+  // Orden de productos: del que menos stock tiene al que más (para incentivar
+  // venta de los que se están por agotar). Los sin stock van al final para no
+  // arruinar la primera impresión.
   for (const cat of categories) {
-    if (!sections[cat.parent]) continue;
+    if (!cat.parent || !collectionData[cat.parent]) continue;
     const items = products
       .filter((p) => p.categoryId === cat.id)
       .map(productToItem)
-      .sort((a, b) => (a._order ?? 0) - (b._order ?? 0));
+      .sort((a, b) => {
+        const aOut = a.outOfStock ? 1 : 0;
+        const bOut = b.outOfStock ? 1 : 0;
+        if (aOut !== bOut) return aOut - bOut;          // sin stock al final
+        if (!a.outOfStock && !b.outOfStock) {
+          if (a.stock !== b.stock) return a.stock - b.stock; // menos stock primero
+        }
+        return (a._order ?? 0) - (b._order ?? 0);       // tie-breaker: orden manual
+      });
     if (items.length === 0) continue;
-    sections[cat.parent].push({
+    collectionData[cat.parent].push({
       title: cat.name,
       description: cat.description || "",
       items,
     });
   }
 
-  collectionData.hombres = sections.hombres;
-  collectionData.mujeres = sections.mujeres;
   featuredProducts = products.filter((p) => p.featured).map(productToItem).slice(0, 8);
+  productsLoaded = true; // marca que los datos llegaron (aunque haya secciones vacías)
+}
+
+// Renderiza la grilla de selección de secciones, los paneles vacíos, el menú
+// del header y los links del footer. Se llama después de loadSections().
+function renderSectionsUI() {
+  // Si la home declara estos contenedores, los llenamos. Si no, ignoramos.
+  const grid = document.getElementById("sections-grid");
+  const panelsRoot = document.getElementById("sections-panels");
+  const nav = document.getElementById("nav");
+  const footerLinks = document.getElementById("footer-links");
+
+  // Secciones que tienen al menos un producto (para no mostrar vacías).
+  // Si todavía no se cargaron datos (collectionData vacío), mostramos todas.
+  const visibleSections = sectionsList.filter((s) => {
+    const buckets = collectionData[s.id];
+    if (!buckets) return true; // todavía no cargaron productos
+    return buckets.length > 0;
+  });
+
+  if (grid) {
+    grid.innerHTML = visibleSections.map((s) => {
+      // resolveCoverUrl: convertir "./men.webp" en "/men.webp" si quedó así
+      let img = s.coverImage?.url || "./hero.webp";
+      if (img.startsWith("./")) img = img.slice(1); // "./men.webp" → "/men.webp"
+      const desc = s.description || "";
+      return `
+        <div class="category-selection-card" data-collection="${escapeHtml(s.id)}">
+          <img src="${escapeHtml(img)}" alt="Colección ${escapeHtml(s.name)}" loading="lazy" decoding="async" />
+          <div class="category-overlay">
+            <div class="category-overlay-content">
+              <h2>${escapeHtml(s.name.toUpperCase())}</h2>
+              ${desc ? `<p>${escapeHtml(desc)}</p>` : ""}
+            </div>
+          </div>
+        </div>`;
+    }).join("");
+  }
+
+  if (panelsRoot) {
+    panelsRoot.innerHTML = sectionsList.map((s) => `
+      <div class="collection-products" id="${escapeHtml(s.id)}-grid" data-panel="${escapeHtml(s.id)}" style="display: none;"></div>
+    `).join("");
+  }
+
+  // Re-cachear las refs de tabs/paneles/roots (ahora viven en el DOM nuevo)
+  collectionTabs = [...document.querySelectorAll("[data-collection]")];
+  collectionPanels = [...document.querySelectorAll("[data-panel]")];
+  for (const s of sectionsList) {
+    collectionRoots[s.id] = document.getElementById(`${s.id}-grid`);
+  }
+
+  // Re-bindear el click de las cards (sin esto los handlers viejos no funcionan
+  // con los nodos nuevos creados por innerHTML)
+  collectionTabs.forEach((tab) => {
+    tab.addEventListener("click", () => setActiveCollection(tab.dataset.collection, { scroll: true }));
+  });
+
+  // Menú del header: link por cada sección + mega-menu con categorías al hover.
+  // Idempotente: limpiamos los previos antes de agregar (sin esto, en re-renders
+  // el menú se duplicaría).
+  if (nav) {
+    nav.querySelectorAll('.site-nav-section').forEach((el) => el.remove());
+
+    sectionsList.forEach((s) => {
+      // Wrapper que contiene el link + el dropdown de categorías
+      const wrap = document.createElement("div");
+      wrap.className = "site-nav-section";
+
+      const a = document.createElement("a");
+      a.href = "#colecciones";
+      a.className = "site-nav-section-link";
+      a.dataset.openCollection = s.id;
+      a.textContent = s.name;
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        setActiveCollection(s.id, { scroll: true });
+        siteNav?.classList.remove("is-open");
+        menuButton?.setAttribute("aria-expanded", "false");
+      });
+      wrap.appendChild(a);
+
+      // Mega-menu con las categorías de esta sección (si tiene)
+      const cats = categoriesList.filter((c) => c.parent === s.id);
+      if (cats.length > 0) {
+        const dd = document.createElement("div");
+        dd.className = "site-nav-dropdown";
+        dd.setAttribute("role", "menu");
+        cats.forEach((c) => {
+          const cl = document.createElement("a");
+          cl.href = "#colecciones";
+          cl.textContent = c.name;
+          cl.addEventListener("click", (e) => {
+            e.preventDefault();
+            setActiveCollection(s.id, { scroll: true });
+            // Scroll hasta el grupo de la categoría dentro del catálogo
+            setTimeout(() => {
+              const root = collectionRoots[s.id];
+              const heading = root?.querySelector(`.product-group-head h4`);
+              const allHeadings = root?.querySelectorAll(".product-group-head h4") || [];
+              for (const h of allHeadings) {
+                if (h.textContent.trim().toLowerCase() === c.name.toLowerCase()) {
+                  h.closest(".product-group")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  break;
+                }
+              }
+            }, 300);
+          });
+          dd.appendChild(cl);
+        });
+        wrap.appendChild(dd);
+      }
+
+      nav.appendChild(wrap);
+    });
+  }
+
+  // Footer: una columna por sección con sus categorías. Si una sección no
+  // tiene categorías, la mostramos igual con un solo link "Ver todo".
+  const footerColsRoot = document.getElementById("footer-sections-cols");
+  if (footerColsRoot) {
+    footerColsRoot.innerHTML = ""; // limpiar antes (idempotente)
+    sectionsList.forEach((s) => {
+      const cats = categoriesList.filter((c) => c.parent === s.id);
+      const col = document.createElement("div");
+      col.className = "footer-col";
+      col.innerHTML = `
+        <h3>${escapeHtml(s.name)}</h3>
+        <ul></ul>
+      `;
+      const ul = col.querySelector("ul");
+      if (cats.length === 0) {
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = "#colecciones";
+        a.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+          Ver todo
+        `;
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          setActiveCollection(s.id, { scroll: true });
+        });
+        li.appendChild(a);
+        ul.appendChild(li);
+      } else {
+        cats.forEach((c) => {
+          const li = document.createElement("li");
+          const a = document.createElement("a");
+          a.href = "#colecciones";
+          a.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            ${escapeHtml(c.name)}
+          `;
+          a.addEventListener("click", (e) => {
+            e.preventDefault();
+            setActiveCollection(s.id, { scroll: true });
+            setTimeout(() => {
+              const root = collectionRoots[s.id];
+              const allHeadings = root?.querySelectorAll(".product-group-head h4") || [];
+              for (const h of allHeadings) {
+                if (h.textContent.trim().toLowerCase() === c.name.toLowerCase()) {
+                  h.closest(".product-group")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  break;
+                }
+              }
+            }, 300);
+          });
+          li.appendChild(a);
+          ul.appendChild(li);
+        });
+      }
+      footerColsRoot.appendChild(col);
+    });
+  }
 }
 
 function productToItem(p) {
@@ -161,8 +378,26 @@ function renderItem(item) {
   const priceHTML = item.price
     ? `<p class="product-price">$${item.price}${item.priceOld ? ` <span style="color:#9ca3af; text-decoration:line-through; font-size:13px; margin-left:4px;">$${item.priceOld}</span>` : ""}</p>`
     : "";
-  // Badge de stock + badges comerciales (descuento + nuevo)
+  // Mensaje pre-armado para WhatsApp con la info clave del producto.
+  // El cliente ya llega con todo, no necesita escribir referencia.
+  const msgParts = [`Hola SPORT17! Me interesa este producto:`];
+  msgParts.push(`📦 *${item.label}*`);
+  if (item.price) msgParts.push(`💰 $${item.price}${item.priceOld ? ` (antes $${item.priceOld})` : ""}`);
+  if (item.sizes?.length) msgParts.push(`📏 Talles: ${item.sizes.join(", ")}`);
+  if (item.colors?.length) msgParts.push(`🎨 Colores: ${item.colors.join(", ")}`);
+  msgParts.push(`\n¿Tenés disponibilidad?`);
+  const personalizedMsg = encodeURIComponent(msgParts.join("\n"));
+  // Badge de stock + badges comerciales (descuento + nuevo + low stock)
   const stockBadge = item.outOfStock ? `<span class="product-badge product-badge-out">Sin stock</span>` : "";
+  // Stock urgente: "¡ÚLTIMO!" cuando queda 1, "¡Quedan X!" cuando hay 2-3.
+  let lowStockBadge = "";
+  if (!item.outOfStock && item.stock > 0 && item.stock <= 3) {
+    if (item.stock === 1) {
+      lowStockBadge = `<span class="product-badge product-badge-last">¡ÚLTIMO!</span>`;
+    } else {
+      lowStockBadge = `<span class="product-badge product-badge-low">¡Quedan ${item.stock}!</span>`;
+    }
+  }
   const discountBadge = item.discountPct > 0
     ? `<span class="product-badge product-badge-discount">-${item.discountPct}%</span>`
     : "";
@@ -172,7 +407,7 @@ function renderItem(item) {
   // Texto buscable: lo metemos en data-search para filtrar sin tocar el DOM
   const searchText = [item.label, item.description, ...(item.sizes || []), ...(item.colors || [])].join(" ").toLowerCase();
 
-  const wspLink = `https://wa.me/${wspBase}?text=Hola%20SPORT17%2C%20quiero%20m%C3%A1s%20info%20sobre%20${encodeURIComponent(item.label)}`;
+  const wspLink = `https://wa.me/${wspBase}?text=${personalizedMsg}`;
   const imgs = item.images || (item.src ? [item.src] : []);
   const hasGallery = imgs.length > 1;
 
@@ -197,14 +432,14 @@ function renderItem(item) {
         <button class="pgal-btn pgal-prev" type="button" aria-label="Foto anterior">${SVG_PREV}</button>
         <button class="pgal-btn pgal-next" type="button" aria-label="Foto siguiente">${SVG_NEXT}</button>
         <div class="pgal-dots">${dotsHtml}</div>
-        <div class="product-badges">${stockBadge}${discountBadge}${newBadge}</div>
+        <div class="product-badges">${stockBadge}${lowStockBadge}${discountBadge}${newBadge}</div>
         ${shareBtn}
       </div>`;
   } else {
     mediaHtml = `
       <div class="product-single-media">
         <img src="${escapeHtml(imgs[0] || "")}" alt="${escapeHtml(item.label)}" loading="lazy" decoding="async" />
-        <div class="product-badges">${stockBadge}${discountBadge}${newBadge}</div>
+        <div class="product-badges">${stockBadge}${lowStockBadge}${discountBadge}${newBadge}</div>
         ${shareBtn}
       </div>`;
   }
@@ -424,9 +659,11 @@ function setActiveCollection(key, { scroll = true } = {}) {
     panel.style.display = panel.dataset.panel === key ? "grid" : "none";
   });
 
-  // Si los datos aún no llegaron, mostrar skeleton
+  // Mostrar skeleton SOLO si todavía estamos esperando datos de Firestore.
+  // Si ya cargaron y esta sección no tiene productos, renderCollection mostrará
+  // el mensaje "Pronto vas a ver productos acá".
   const hasData = (collectionData[key] || []).length > 0;
-  if (!hasData) {
+  if (!productsLoaded && !hasData) {
     renderSkeleton(key);
   } else {
     renderCollection(key);
@@ -454,11 +691,12 @@ document.querySelectorAll('a[href^="#"]').forEach((link) => {
   });
 });
 
-collectionTabs.forEach((tab) => {
-  tab.addEventListener("click", () => setActiveCollection(tab.dataset.collection, { scroll: true }));
-});
-
+// Los handlers de tabs y de [data-open-collection] se registran en
+// renderSectionsUI() porque los nodos son dinámicos. Acá solo dejamos el
+// soporte para "data-open-group" (deep link a un sub-riel específico) en
+// caso de que algún elemento estático use el patrón viejo.
 document.querySelectorAll("[data-open-collection]").forEach((link) => {
+  // (este selector solo capta lo que esté en el HTML inicial)
   link.addEventListener("click", (e) => {
     e.preventDefault();
     const collection = link.dataset.openCollection;
@@ -623,14 +861,16 @@ function applySearch(value) {
 
   const q = searchQuery.trim().toLowerCase();
 
-  // Si hay búsqueda y todavía no hay colección activa, abrir la que tenga
-  // más resultados — SIN scroll para no mover al usuario de su lugar.
-  if (q && !activeCollectionKey) {
-    const hombres = countMatchesIn("hombres", q);
-    const mujeres = countMatchesIn("mujeres", q);
-    const target = hombres >= mujeres ? "hombres" : "mujeres";
-    setActiveCollection(target, { scroll: false });
-    return;
+  // Si hay búsqueda y todavía no hay sección activa, abrir la que tenga más
+  // matches entre todas las secciones cargadas. SIN scroll.
+  if (q && !activeCollectionKey && sectionsList.length > 0) {
+    const counts = sectionsList.map((s) => ({ id: s.id, count: countMatchesIn(s.id, q) }));
+    counts.sort((a, b) => b.count - a.count);
+    const winner = counts[0];
+    if (winner && winner.count > 0) {
+      setActiveCollection(winner.id, { scroll: false });
+      return;
+    }
   }
 
   // Filtro puro por CSS: no toca el DOM, no rompe el scroll.
@@ -787,46 +1027,96 @@ document.addEventListener("click", (e) => {
   shareProduct(btn.dataset.label || "", btn.dataset.img || "");
 });
 
+// ═══════ Newsletter: captura de leads ═══════
+
+const newsletterForm = document.getElementById("newsletter-form");
+const newsletterEmail = document.getElementById("newsletter-email");
+const newsletterSubmit = document.getElementById("newsletter-submit");
+const newsletterFeedback = document.getElementById("newsletter-feedback");
+
+function showNewsletterFeedback(message, type = "success") {
+  if (!newsletterFeedback) return;
+  newsletterFeedback.textContent = message;
+  newsletterFeedback.className = "newsletter-feedback is-" + type;
+  newsletterFeedback.hidden = false;
+}
+
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+newsletterForm?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const email = (newsletterEmail?.value || "").trim();
+  if (!email || !EMAIL_RE.test(email)) {
+    showNewsletterFeedback("Ingresá un email válido.", "error");
+    newsletterEmail?.focus();
+    return;
+  }
+
+  // Anti doble-submit del mismo navegador (no es seguridad real, solo UX)
+  const dismissedKey = "sport17_newsletter_dismissed";
+  if (localStorage.getItem(dismissedKey) === email) {
+    showNewsletterFeedback("¡Ya estás suscripto! Te avisamos cuando haya ofertas.", "success");
+    return;
+  }
+
+  newsletterSubmit.disabled = true;
+  const btnText = newsletterSubmit.querySelector(".newsletter-btn-text");
+  const originalText = btnText?.textContent;
+  if (btnText) btnText.textContent = "Enviando...";
+
+  try {
+    await addDoc(collection(db, "newsletter"), {
+      email,
+      source: "home_footer",
+      createdAt: serverTimestamp(),
+    });
+    localStorage.setItem(dismissedKey, email);
+    showNewsletterFeedback("¡Listo! Te vamos a avisar de las próximas ofertas.", "success");
+    newsletterForm.reset();
+  } catch (err) {
+    console.error("Newsletter error:", err);
+    showNewsletterFeedback("No pudimos guardar tu email. Probá de nuevo en un rato.", "error");
+  } finally {
+    newsletterSubmit.disabled = false;
+    if (btnText && originalText) btnText.textContent = originalText;
+  }
+});
+
 // ═══════ Boot ═══════
 
 (async () => {
   try {
-    // Mostrar skeleton inmediatamente en la grilla activa si hay
-    collectionTabs.forEach((tab) => {
-      if (tab.classList.contains("is-active")) {
-        renderSkeleton(tab.dataset.collection);
-      }
-    });
-
+    // 1) Settings + secciones primero: necesitamos el menú/UI antes de pintar productos
     await loadStoreSettings();
     syncWhatsappLinks();
     renderPromoBanner();
 
+    await loadSections();
+    renderSectionsUI();
+
+    // 2) Cargar productos y categorías
     await loadCategoriesAndProducts();
-    // pre-renderizar destacados en home
     renderFeatured();
-    // si el usuario ya cambió a una tab antes de que carguen los datos, repintar
-    collectionTabs.forEach((tab) => {
-      if (tab.classList.contains("is-active")) {
-        delete collectionRoots[tab.dataset.collection].dataset.rendered;
-        renderCollection(tab.dataset.collection);
-      }
-    });
-    // Si ya hay una colección activa por click previo, re-render con datos reales
+
+    // Re-render para ocultar secciones vacías ahora que sabemos qué hay
+    renderSectionsUI();
+
+    // Si el usuario ya tocó alguna sección antes de que llegaran los datos, repintar
     if (activeCollectionKey) renderCollection(activeCollectionKey);
+
+    // Si ninguna está activa pero hay datos, dejamos las cards de selección
+    // listas para que el usuario elija
 
     // Iniciar autoplay del hero después de cargar
     startHeroAutoplay();
   } catch (err) {
     console.error("Error cargando productos:", err);
-    // si Firestore falla, mostramos un mensaje suave
     Object.values(collectionRoots).forEach((root) => {
       if (!root) return;
       root.innerHTML = `<div style="padding:40px; text-align:center; color:rgba(255,255,255,0.7);">
         <p>Estamos actualizando el catálogo. Volvé en unos minutos o consultanos por WhatsApp.</p>
       </div>`;
     });
-    // Aún sin datos, el hero debe andar
     startHeroAutoplay();
   }
 })();

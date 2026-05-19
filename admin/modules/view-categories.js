@@ -3,6 +3,8 @@
 import {
   fetchCategories,
   fetchProducts,
+  fetchSections,
+  ensureDefaultSections,
   createCategory,
   updateCategory,
   deleteCategoryDoc,
@@ -14,7 +16,12 @@ import { toast, confirmDialog, openModal, loadingState } from "./ui.js";
 
 export async function renderCategories(outlet) {
   outlet.innerHTML = loadingState("Cargando categorías...");
-  const [categories, products] = await Promise.all([fetchCategories(), fetchProducts()]);
+  await ensureDefaultSections();
+  const [categories, products, sections] = await Promise.all([
+    fetchCategories(), fetchProducts(), fetchSections(),
+  ]);
+  // Helper: resolver el nombre legible de la sección padre desde su slug.
+  const sectionById = new Map(sections.map((s) => [s.id, s]));
 
   const counts = {};
   products.forEach((p) => { counts[p.categoryId] = (counts[p.categoryId] || 0) + 1; });
@@ -49,13 +56,13 @@ export async function renderCategories(outlet) {
         <tbody id="cat-tbody">
           ${categories.length === 0 ? `
             <tr><td colspan="7"><div class="empty"><h3>Sin categorías</h3><p>Creá la primera para empezar a organizar productos.</p></div></td></tr>
-          ` : categories.map((c) => row(c, counts)).join("")}
+          ` : categories.map((c) => row(c, counts, sectionById)).join("")}
         </tbody>
       </table>
     </div>
   `;
 
-  $("#new-cat-btn").onclick = () => openCategoryEditor(null, () => renderCategories(outlet));
+  $("#new-cat-btn").onclick = () => openCategoryEditor(null, sections, categories, () => renderCategories(outlet));
 
   // Hacer las filas reordenables con drag&drop
   const tbody = $("#cat-tbody");
@@ -99,7 +106,7 @@ export async function renderCategories(outlet) {
     const edit = e.target.closest("[data-edit]");
     if (edit) {
       const cat = categories.find((c) => c.id === edit.dataset.edit);
-      openCategoryEditor(cat, () => renderCategories(outlet));
+      openCategoryEditor(cat, sections, categories, () => renderCategories(outlet));
       return;
     }
     const del = e.target.closest("[data-delete]");
@@ -141,8 +148,10 @@ export async function renderCategories(outlet) {
   });
 }
 
-function row(c, counts) {
+function row(c, counts, sectionById) {
   const count = counts[c.id] || 0;
+  const sec = c.parent ? sectionById?.get(c.parent) : null;
+  const parentLabel = sec ? sec.name : (c.parent || "");
   return `
     <tr data-id="${c.id}">
       <td>${c.coverImage?.url ? `<img class="table-thumb" src="${escapeHtml(c.coverImage.url)}" alt="">` : `<div class="table-thumb-empty">sin foto</div>`}</td>
@@ -150,7 +159,7 @@ function row(c, counts) {
         <strong>${escapeHtml(c.name)}</strong>
         ${c.description ? `<div style="font-size:12px; color:var(--text-mute); margin-top:2px;">${escapeHtml(c.description.slice(0, 80))}${c.description.length > 80 ? "..." : ""}</div>` : ""}
       </td>
-      <td>${c.parent ? `<span class="badge badge-info">${escapeHtml(c.parent)}</span>` : `<span style="color:var(--text-mute);">—</span>`}</td>
+      <td>${parentLabel ? `<span class="badge badge-info">${escapeHtml(parentLabel)}</span>` : `<span style="color:var(--text-mute);">—</span>`}</td>
       <td>${count}</td>
       <td>
         <label class="form-toggle">
@@ -166,10 +175,15 @@ function row(c, counts) {
     </tr>`;
 }
 
-function openCategoryEditor(category, onSaved) {
+function openCategoryEditor(category, sections, allCategories, onSaved) {
   const isNew = !category;
   const cat = category || { name: "", description: "", parent: "", active: true, order: 0, coverImage: null };
   let coverImage = cat.coverImage;
+  // Las secciones disponibles vienen de Firestore. Si no llegaron por algún
+  // motivo, asumimos hombres/mujeres legacy para no bloquear el form.
+  const sectionOptions = (sections && sections.length > 0)
+    ? sections
+    : [{ id: "hombres", name: "Hombres" }, { id: "mujeres", name: "Mujeres" }];
 
   const body = el("div");
   body.innerHTML = `
@@ -187,10 +201,11 @@ function openCategoryEditor(category, onSaved) {
           <label>Sección padre</label>
           <select class="form-select" name="parent">
             <option value="" ${!cat.parent ? "selected" : ""}>— Ninguna —</option>
-            <option value="hombres" ${cat.parent === "hombres" ? "selected" : ""}>Hombres</option>
-            <option value="mujeres" ${cat.parent === "mujeres" ? "selected" : ""}>Mujeres</option>
+            ${sectionOptions.map((s) => `
+              <option value="${escapeHtml(s.id)}" ${cat.parent === s.id ? "selected" : ""}>${escapeHtml(s.name)}</option>
+            `).join("")}
           </select>
-          <span class="form-hint">Para mostrar en el tab correcto de la tienda.</span>
+          <span class="form-hint">Para mostrar en el tab correcto de la tienda. <a href="#/sections" style="color:var(--primary);">Gestionar secciones</a></span>
         </div>
         <div class="form-row">
           <label>Orden</label>
@@ -255,10 +270,28 @@ function openCategoryEditor(category, onSaved) {
     const name = f.name.value.trim();
     if (!name) { toast("El nombre es obligatorio", "error"); return; }
 
+    // Validar que no exista otra categoría con el mismo nombre+sección padre.
+    const parent = f.parent.value;
+    const normName = name.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+    const duplicate = (allCategories || []).some((c) => {
+      if (cat.id && c.id === cat.id) return false; // ignorar self al editar
+      const cName = String(c.name || "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+      return cName === normName && (c.parent || "") === (parent || "");
+    });
+    if (duplicate) {
+      toast(
+        parent
+          ? `Ya existe la categoría "${name}" en esa sección.`
+          : `Ya existe una categoría con ese nombre.`,
+        "error"
+      );
+      return;
+    }
+
     const data = {
       name,
       description: f.description.value.trim(),
-      parent: f.parent.value,
+      parent,
       order: parseInt(f.order.value, 10) || 0,
       active: f.active.checked,
       coverImage,

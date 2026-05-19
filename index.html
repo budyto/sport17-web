@@ -104,10 +104,7 @@
 
         <nav id="nav" class="site-nav">
           <a href="#inicio">Inicio</a>
-          <a href="#colecciones" data-open-collection="hombres">Hombres</a>
-          <a href="#colecciones" data-open-collection="mujeres">Mujeres</a>
-          <a href="#colecciones" data-open-collection="hombres" data-open-group="Perfumes Hombres">Perfumes Hombre</a>
-          <a href="#colecciones" data-open-collection="mujeres" data-open-group="Perfumes Mujeres">Perfumes Mujer</a>
+          <!-- Los links de secciones se inyectan dinámicamente desde main.js -->
         </nav>
 
         <!-- Buscador en el header (estilo Tiendanube/MG) -->
@@ -241,33 +238,90 @@
           <p class="section-intro-text">Seleccioná tu sección y descubrí toda la indumentaria disponible. Consultá precio y talle por WhatsApp en segundos.</p>
         </div>
 
-        <div class="category-selection-grid">
-          <div class="category-selection-card" data-collection="hombres">
-            <img src="./men.webp" alt="Colección Hombres — Conjuntos, camperas, zapatillas y más" />
-            <div class="category-overlay">
-              <div class="category-overlay-content">
-                <h2>HOMBRES</h2>
-                <p>Conjuntos · Camperas · Zapatillas · Perfumes</p>
-              </div>
-            </div>
-          </div>
-          <div class="category-selection-card" data-collection="mujeres">
-            <img src="./women.webp" alt="Colección Mujeres — Conjuntos, camperas, perfumes y más" />
-            <div class="category-overlay">
-              <div class="category-overlay-content">
-                <h2>MUJERES</h2>
-                <p>Conjuntos · Camperas · Buzos · Perfumes</p>
-              </div>
-            </div>
-          </div>
-        </div>
+        <!-- Las cards de secciones se generan dinámicamente desde main.js -->
+        <div class="category-selection-grid" id="sections-grid"></div>
 
         <div id="collection-container" class="collection-stage" style="display: none; margin-top: 50px;">
           <!-- Estado de búsqueda (contador) -->
           <p class="catalog-search-count" id="search-count"></p>
+          <!-- Los grids de productos por sección se generan dinámicamente desde main.js -->
+          <div id="sections-panels"></div>
+        </div>
+      </section>
 
-          <div class="collection-products" id="hombres-grid" data-panel="hombres" style="display: none;"></div>
-          <div class="collection-products" id="mujeres-grid" data-panel="mujeres" style="display: none;"></div>
+      <!-- Testimonios / Reviews -->
+      <section class="section reviews-section" aria-label="Opiniones de clientes">
+        <div class="section-intro">
+          <h2 class="section-intro-title">Lo que dicen nuestros clientes</h2>
+          <p class="section-intro-text">Más de 1.000 clientes felices en todo el país. Estos son algunos de los mensajes que recibimos.</p>
+        </div>
+        <div class="reviews-rail" id="reviews-rail">
+          <article class="review-card">
+            <div class="review-stars" aria-label="5 estrellas">★★★★★</div>
+            <p class="review-text">"Llegó re rápido y la calidad es buenísima. La campera es igual a la foto, ya pedí otra en otro color."</p>
+            <div class="review-author">
+              <span class="review-avatar" style="--avatar-from:#f59e0b; --avatar-to:#dc2626;">M</span>
+              <div>
+                <strong>Mariana G.</strong>
+                <span>Buenos Aires</span>
+              </div>
+            </div>
+          </article>
+          <article class="review-card">
+            <div class="review-stars" aria-label="5 estrellas">★★★★★</div>
+            <p class="review-text">"Atención de 10. Me asesoraron con el talle por WhatsApp y le pegué al toque. Conjunto Argentina, una bomba."</p>
+            <div class="review-author">
+              <span class="review-avatar" style="--avatar-from:#3b82f6; --avatar-to:#1e40af;">J</span>
+              <div>
+                <strong>Juan P.</strong>
+                <span>Córdoba</span>
+              </div>
+            </div>
+          </article>
+          <article class="review-card">
+            <div class="review-stars" aria-label="5 estrellas">★★★★★</div>
+            <p class="review-text">"Las zapatillas son originales 100%, mejor precio que cualquier local. Envío rápido a Rosario, recomendadísimo."</p>
+            <div class="review-author">
+              <span class="review-avatar" style="--avatar-from:#22c55e; --avatar-to:#15803d;">L</span>
+              <div>
+                <strong>Lucas M.</strong>
+                <span>Rosario</span>
+              </div>
+            </div>
+          </article>
+          <article class="review-card">
+            <div class="review-stars" aria-label="5 estrellas">★★★★★</div>
+            <p class="review-text">"El perfume llegó perfecto, la fragancia es intensa y dura todo el día. Me sorprendió la calidad por el precio."</p>
+            <div class="review-author">
+              <span class="review-avatar" style="--avatar-from:#ec4899; --avatar-to:#be185d;">S</span>
+              <div>
+                <strong>Sofía R.</strong>
+                <span>Mendoza</span>
+              </div>
+            </div>
+          </article>
+          <article class="review-card">
+            <div class="review-stars" aria-label="5 estrellas">★★★★★</div>
+            <p class="review-text">"Compré varias veces, siempre cumplen. Pago por transferencia y aprovecho el descuento, todo joya."</p>
+            <div class="review-author">
+              <span class="review-avatar" style="--avatar-from:#8b5cf6; --avatar-to:#6d28d9;">N</span>
+              <div>
+                <strong>Nicolás T.</strong>
+                <span>La Plata</span>
+              </div>
+            </div>
+          </article>
+          <article class="review-card">
+            <div class="review-stars" aria-label="5 estrellas">★★★★★</div>
+            <p class="review-text">"El buzo es tela premium, abriga un montón y queda con caída perfecta. Voy a pedir otro de regalo."</p>
+            <div class="review-author">
+              <span class="review-avatar" style="--avatar-from:#06b6d4; --avatar-to:#0e7490;">C</span>
+              <div>
+                <strong>Camila V.</strong>
+                <span>Tucumán</span>
+              </div>
+            </div>
+          </article>
         </div>
       </section>
 
@@ -282,6 +336,26 @@
       </div>
 
     </main>
+
+    <!-- ═══════════════════ NEWSLETTER ═══════════════════ -->
+    <section class="newsletter-section" aria-label="Suscribite a ofertas">
+      <div class="newsletter-inner">
+        <div class="newsletter-copy">
+          <h3>Suscribite y enterate primero</h3>
+          <p>Ofertas, novedades y descuentos exclusivos directo a tu mail. Sin spam, palabra.</p>
+        </div>
+        <form id="newsletter-form" class="newsletter-form" method="post" action="javascript:void(0)" autocomplete="on" novalidate>
+          <input type="email" name="email" id="newsletter-email" placeholder="tu@email.com" required autocomplete="email" aria-label="Tu email" />
+          <button type="submit" id="newsletter-submit">
+            <span class="newsletter-btn-text">Quiero recibir ofertas</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+            </svg>
+          </button>
+        </form>
+        <p id="newsletter-feedback" class="newsletter-feedback" hidden></p>
+      </div>
+    </section>
 
     <!-- ═══════════════════ FOOTER ═══════════════════ -->
     <footer class="site-footer">
@@ -338,42 +412,9 @@
 
         </div>
 
-        <!-- Links rápidos -->
-        <div class="footer-col">
-          <h3>Links rápidos</h3>
-          <ul>
-            <li>
-              <a href="#inicio">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-                Inicio
-              </a>
-            </li>
-            <li>
-              <a href="#colecciones" data-open-collection="hombres">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
-                Hombres
-              </a>
-            </li>
-            <li>
-              <a href="#colecciones" data-open-collection="mujeres">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
-                Mujeres
-              </a>
-            </li>
-            <li>
-              <a href="#colecciones" data-open-collection="hombres" data-open-group="Perfumes Hombres">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l1 4H8z"/><path d="M8 7c0 8 8 13 4 17"/><path d="M16 7c0 8-8 13-4 17"/></svg>
-                Perfumes Hombre
-              </a>
-            </li>
-            <li>
-              <a href="#colecciones" data-open-collection="mujeres" data-open-group="Perfumes Mujeres">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l1 4H8z"/><path d="M8 7c0 8 8 13 4 17"/><path d="M16 7c0 8-8 13-4 17"/></svg>
-                Perfumes Mujer
-              </a>
-            </li>
-          </ul>
-        </div>
+        <!-- Una columna por sección con sus categorías. Se inyecta dinámicamente
+             desde main.js cuando se cargan secciones y categorías. -->
+        <div class="footer-sections-cols" id="footer-sections-cols"></div>
 
         <!-- Redes -->
         <div class="footer-col">

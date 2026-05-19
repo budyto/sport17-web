@@ -6,7 +6,8 @@
 
 import * as XLSX from "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm";
 import {
-  fetchProducts, fetchCategories, bulkUpdateProducts, createProduct, updateProduct,
+  fetchProducts, fetchCategories, fetchSections, ensureDefaultSections,
+  bulkUpdateProducts, createProduct, updateProduct,
   saveImportSnapshot, fetchImportHistory, deleteImportSnapshot, rollbackImport,
 } from "./data.js";
 import { escapeHtml, $, formatDateTime } from "./helpers.js";
@@ -15,8 +16,13 @@ import { getCurrentUser } from "./auth.js";
 
 export async function renderImport(outlet) {
   outlet.innerHTML = loadingState();
-  const [products, categories] = await Promise.all([fetchProducts(), fetchCategories()]);
+  await ensureDefaultSections();
+  const [products, categories, sections] = await Promise.all([
+    fetchProducts(), fetchCategories(), fetchSections(),
+  ]);
   const catById = (id) => categories.find((c) => c.id === id);
+  // Mapeo slug → nombre legible para la columna "Genero" del Excel
+  const sectionNameBySlug = new Map(sections.map((s) => [s.id, s.name]));
 
   outlet.innerHTML = `
     <div class="page-head">
@@ -78,8 +84,8 @@ export async function renderImport(outlet) {
   `;
 
   // ── Export
-  $("#export-xlsx").onclick = () => exportFile(products, catById, "xlsx");
-  $("#export-csv").onclick = () => exportFile(products, catById, "csv");
+  $("#export-xlsx").onclick = () => exportFile(products, catById, "xlsx", sectionNameBySlug);
+  $("#export-csv").onclick = () => exportFile(products, catById, "csv", sectionNameBySlug);
 
   // ── Import
   const uploader = $("#xls-uploader");
@@ -127,7 +133,7 @@ export async function renderImport(outlet) {
     const toUpdate = [];
     const skipped = [];
     for (const r of rows) {
-      const parsed = parseRow(r, categories);
+      const parsed = parseRow(r, categories, sections);
       if (!parsed) { skipped.push(r); continue; }
       const { id, sku, fields } = parsed;
 
@@ -348,7 +354,7 @@ function extractRows(sheet) {
   return out;
 }
 
-function parseRow(r, categories) {
+function parseRow(r, categories, sections = []) {
   // Normalizamos nombres de columna: minúsculas, sin espacios, sin acentos, sin paréntesis.
   const norm = (k) =>
     String(k)
@@ -386,17 +392,41 @@ function parseRow(r, categories) {
   if (get("tallesdisponibles", "talles", "sizes") !== undefined) fields.sizes = list(get("tallesdisponibles", "talles", "sizes"));
   if (get("colores", "colors") !== undefined) fields.colors = list(get("colores", "colors"));
 
-  // Resolver categoría: priorizamos combo Género+Categoría → slug del seed (ej. "Hombre"+"Camiseta" → "hombres-camisetas").
-  // Si no matchea, caemos al match por nombre exacto de categoría.
-  const genero = String(get("genero", "seccion", "gender") || "").toLowerCase().trim();
+  // Resolver categoría a partir del combo "Genero" + "Categoria" del Excel.
+  // El valor de "Genero" puede ser cualquier nombre de sección (Hombre, Mujer,
+  // Tecnología, Hogar, etc.). Lo resolvemos primero contra los slugs reales y
+  // si no matchea hacemos heurística por inicial (compat con "Hombre"/"Mujer").
+  const genero = String(get("genero", "seccion", "gender") || "").trim();
   const categoria = String(get("categoria", "category") || "").trim();
   if (categoria) {
-    const parent = genero.startsWith("h") ? "hombres" : genero.startsWith("m") ? "mujeres" : "";
+    const parent = resolveSectionSlug(genero, sections);
     const cat = resolveCategory(categories, categoria, parent);
     if (cat) fields.categoryId = cat.id;
   }
 
   return { id: idCol ? String(idCol).trim() : null, sku, fields };
+}
+
+// Resuelve el slug de sección a partir del texto que vino del Excel.
+// Acepta: slug directo ("hombres"), nombre de sección ("Hombres"), o iniciales
+// legacy ("h" → hombres, "m" → mujeres). Devuelve "" si no hay match.
+function resolveSectionSlug(input, sections) {
+  if (!input) return "";
+  const norm = String(input).toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").trim();
+  if (!norm) return "";
+  // Match exacto contra slug
+  const bySlug = sections.find((s) => s.id.toLowerCase() === norm);
+  if (bySlug) return bySlug.id;
+  // Match exacto contra nombre normalizado
+  const byName = sections.find((s) => String(s.name || "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").trim() === norm);
+  if (byName) return byName.id;
+  // Match prefijo (ej. "hombre" → "hombres" si el slug empieza con hombre)
+  const byPrefix = sections.find((s) => s.id.toLowerCase().startsWith(norm) || norm.startsWith(s.id.toLowerCase()));
+  if (byPrefix) return byPrefix.id;
+  // Fallback legacy: si dice "h*" mapeamos a la sección de hombres si existe
+  if (norm.startsWith("h") && sections.some((s) => s.id === "hombres")) return "hombres";
+  if (norm.startsWith("m") && sections.some((s) => s.id === "mujeres")) return "mujeres";
+  return "";
 }
 
 function resolveCategory(categories, name, parent) {
@@ -494,180 +524,377 @@ function getMainImageUrl(p) {
   return main?.url || "";
 }
 
-function exportFile(products, catById, format) {
-  // Ordenamos productos por género y categoría para que el Excel salga prolijo,
-  // igual que el Sheets maestro: primero Hombres, después Mujeres.
+// Carga ExcelJS dinámicamente solo cuando se necesita (~600KB).
+// Lo cargamos via UMD para que exponga `window.ExcelJS`. Esto evita peso muerto
+// en el bundle inicial del admin (la mayoría no exporta seguido).
+async function loadExcelJS() {
+  if (window.ExcelJS) return window.ExcelJS;
+  await new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js";
+    s.async = true;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("No se pudo cargar ExcelJS desde el CDN."));
+    document.head.appendChild(s);
+  });
+  return window.ExcelJS;
+}
+
+async function exportFile(products, catById, format, sectionNameBySlug = new Map()) {
+  // Ordenamos productos: agrupados por sección (parent), luego categoría, luego nombre.
+  // Las secciones se ordenan por slug para que el output sea estable.
   const sortedProducts = [...products].sort((a, b) => {
     const catA = catById(a.categoryId);
     const catB = catById(b.categoryId);
-    const parentA = catA?.parent === "hombres" ? 0 : catA?.parent === "mujeres" ? 1 : 2;
-    const parentB = catB?.parent === "hombres" ? 0 : catB?.parent === "mujeres" ? 1 : 2;
-    if (parentA !== parentB) return parentA - parentB;
+    const parentA = catA?.parent || "zzz";
+    const parentB = catB?.parent || "zzz";
+    if (parentA !== parentB) return parentA.localeCompare(parentB);
     const orderA = catA?.order ?? 999;
     const orderB = catB?.order ?? 999;
     if (orderA !== orderB) return orderA - orderB;
     return (a.name || "").localeCompare(b.name || "");
   });
 
-  // Cabecera completa: 18 columnas comerciales + 3 metadatos para import inverso.
-  const headers = [
-    "ID",
-    "Genero",
-    "Categoria",
-    "Nombre del Producto",
-    "Colores",
-    "Talles Disponibles",
-    "Precio ($)",
-    "Precio Anterior ($)",
-    "% Descuento",
-    "Costo ($)",
-    "Ganancia ($)",
-    "Ganancia (%)",
-    "Stock",
-    "Alerta Stock",
-    "Imagen Principal",
-    "Notas",
-    "Creado",
-    "Ultimo Cambio",
-    // Metadatos para import (al final)
-    "Activo",
-    "Destacado",
-    "ID Firestore",
+  if (format === "csv") {
+    return exportFileCsv(sortedProducts, catById, sectionNameBySlug);
+  }
+
+  try {
+    const ExcelJS = await loadExcelJS();
+    await exportFileXlsx(ExcelJS, sortedProducts, catById, sectionNameBySlug);
+    toast(`Catálogo descargado (${sortedProducts.length} productos)`);
+  } catch (err) {
+    console.error(err);
+    toast("Error al exportar: " + err.message, "error");
+  }
+}
+
+// Resolve "Hombres" / "Mujeres" / "Tecnología" según el slug del parent. Si no
+// matchea con ninguna sección activa, hacemos un fallback al string crudo
+// capitalizado (ej: "ropa-deportiva" → "Ropa Deportiva").
+function resolveGeneroLabel(parentSlug, sectionNameBySlug) {
+  if (!parentSlug) return "";
+  const name = sectionNameBySlug?.get?.(parentSlug);
+  if (name) return name;
+  return parentSlug
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase())
+    .join(" ");
+}
+
+// ─────────────────────────── EXPORT XLSX (ExcelJS) ───────────────────────────
+// Replica el formato del archivo maestro del cliente:
+//   - Hoja "CATALOGO": título mergeado A1:M1 con fondo #1A1A2E, header fila 2
+//     con fondo #16213E, freeze A3, autofilter A2:M*, fórmulas en Ganancia $
+//     y %, Alerta Stock dinámica.
+//   - Hoja "RESUMEN": métricas y desglose por categoría con fórmulas COUNTIF
+//     y AVERAGEIFS.
+//   - Hoja "GUIA DE USO": documentación de las columnas y procedimientos.
+
+async function exportFileXlsx(ExcelJS, sortedProducts, catById, sectionNameBySlug) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "SPORT17 Admin";
+  wb.created = new Date();
+
+  // ═══════ HOJA 1: CATALOGO ═══════
+  const ws = wb.addWorksheet("CATALOGO", {
+    views: [{ state: "frozen", xSplit: 0, ySplit: 2, activeCell: "A3" }],
+  });
+
+  // Anchos de columna (12 + 1 = 13 columnas: A..M)
+  ws.columns = [
+    { width: 6 },     // A: ID
+    { width: 10 },    // B: Genero
+    { width: 16 },    // C: Categoria
+    { width: 42.71 }, // D: Nombre del Producto
+    { width: 16 },    // E: Precio Anterior ($)
+    { width: 12.43 }, // F: Precio ($)
+    { width: 11 },    // G: Costo ($)
+    { width: 13 },    // H: Ganancia ($)
+    { width: 12 },    // I: Ganancia (%)
+    { width: 28 },    // J: Talles Disponibles
+    { width: 9.71 },  // K: Stock
+    { width: 13 },    // L: Alerta Stock
+    { width: 24 },    // M: Notas
   ];
 
-  const dataRows = sortedProducts.map((p, i) => {
+  // Fila 1: título mergeado A1:M1
+  ws.mergeCells("A1:M1");
+  const titleCell = ws.getCell("A1");
+  titleCell.value = "SPORT17 — Catálogo de Productos";
+  titleCell.font = { name: "Arial", size: 14, bold: true, color: { argb: "FFFFFFFF" } };
+  titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1A1A2E" } };
+  titleCell.alignment = { horizontal: "center", vertical: "middle" };
+  ws.getRow(1).height = 30;
+
+  // Fila 2: headers
+  const headers = [
+    "ID", "Genero", "Categoria", "Nombre del Producto",
+    "Precio Anterior ($)", "Precio ($)", "Costo ($)", "Ganancia ($)", "Ganancia (%)",
+    "Talles Disponibles", "Stock", "Alerta Stock", "Notas",
+  ];
+  const headerRow = ws.getRow(2);
+  headers.forEach((h, i) => {
+    const cell = headerRow.getCell(i + 1);
+    cell.value = h;
+    cell.font = { name: "Arial", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF16213E" } };
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    cell.border = {
+      top: { style: "thin", color: { argb: "FFE5E7EB" } },
+      bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
+      left: { style: "thin", color: { argb: "FFE5E7EB" } },
+      right: { style: "thin", color: { argb: "FFE5E7EB" } },
+    };
+  });
+  headerRow.height = 36;
+
+  // Filas 3+: data
+  sortedProducts.forEach((p, i) => {
+    const r = i + 3;
     const cat = catById(p.categoryId);
-    const genero = cat?.parent === "hombres" ? "Hombre" : cat?.parent === "mujeres" ? "Mujer" : "";
+    const genero = resolveGeneroLabel(cat?.parent, sectionNameBySlug);
     const precio = normalizePriceValue(p.price);
     const precioOld = normalizePriceValue(p.priceOld);
     const costo = normalizePriceValue(p.cost);
-    // % de descuento si hay precio anterior mayor al actual
-    const descuentoPct = (precioOld > 0 && precio > 0 && precioOld > precio)
-      ? Math.round((1 - precio / precioOld) * 100)
-      : "";
-    const ganancia = costo > 0 && precio > 0 ? precio - costo : "";
-    const gananciaPct = costo > 0 ? Math.round(((precio - costo) / costo) * 100) : "";
-    const stock = p.stock ?? 0;
-    const alerta = stock <= 0 ? "AGOTADO" : stock <= 3 ? "BAJO" : "OK";
-    return [
-      generateExportId(p, i),
-      genero,
-      categoryToSingular(cat?.name),
-      p.name || "",
-      (p.colors || []).join(","),
-      (p.sizes || []).join(","),
-      precio || "",
-      precioOld || "",
-      descuentoPct === "" ? "" : descuentoPct,
-      costo || "",
-      ganancia,
-      gananciaPct,
-      stock,
-      alerta,
-      getMainImageUrl(p),
-      p.description || "",
-      formatTimestamp(p.createdAt),
-      formatTimestamp(p.updatedAt),
-      p.active ? "Si" : "No",
-      p.featured ? "Si" : "No",
-      p.id,
-    ];
+    const stock = p.stock;
+
+    const row = ws.getRow(r);
+    row.getCell(1).value = generateExportId(p, i);                          // A: ID
+    row.getCell(2).value = genero;                                          // B: Genero
+    row.getCell(3).value = categoryToSingular(cat?.name);                   // C: Categoria
+    row.getCell(4).value = p.name || "";                                    // D: Nombre
+    if (precioOld > 0) row.getCell(5).value = precioOld;                    // E: Precio Anterior
+    if (precio > 0) row.getCell(6).value = precio;                          // F: Precio
+    if (costo > 0) row.getCell(7).value = costo;                            // G: Costo
+    row.getCell(8).value = { formula: `IF(AND(F${r}<>"",G${r}<>""),F${r}-G${r},"")` };       // H: Ganancia $
+    row.getCell(9).value = { formula: `IF(AND(G${r}<>"",G${r}<>0,H${r}<>""),H${r}/G${r},"")` }; // I: Ganancia %
+    row.getCell(10).value = (p.sizes || []).join(",");                      // J: Talles
+    if (typeof stock === "number") row.getCell(11).value = stock;           // K: Stock
+    row.getCell(12).value = {                                                // L: Alerta Stock (fórmula)
+      formula: `IF(K${r}="","Sin dato",IF(K${r}=0,"AGOTADO",IF(K${r}<=3,"BAJO","OK")))`
+    };
+    row.getCell(13).value = p.description || "";                            // M: Notas
+
+    // Formato de moneda en columnas E, F, G, H
+    ["E", "F", "G", "H"].forEach((col) => {
+      row.getCell(col).numFmt = '"$"#,##0';
+    });
+    // Formato porcentaje en I
+    row.getCell("I").numFmt = '0.0%;(0.0%);-';
+
+    // Estilo "celda editable" en Precio (F) — azul sobre gris claro, como el cliente.
+    const precioCell = row.getCell(6);
+    precioCell.font = { color: { argb: "FF0000FF" } };
+    precioCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8F9FA" } };
+
+    // Filas zebra (alternar fondo cada par) para legibilidad
+    if (i % 2 === 1) {
+      [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13].forEach((c) => {
+        const cell = row.getCell(c);
+        if (!cell.fill || cell.fill.type !== "pattern") {
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFAFBFC" } };
+        }
+      });
+    }
   });
 
-  // Construimos la hoja como array-of-arrays para tener control fino sobre
-  // tipos de celda y formato (no es lo mismo que json_to_sheet).
-  const aoa = [headers, ...dataRows];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  // Autofilter en toda la tabla
+  const lastRow = sortedProducts.length + 2;
+  ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: lastRow, column: 13 } };
 
-  // Formatos por columna (las letras corresponden a la nueva estructura de 21 columnas):
-  //   G=Precio  H=Precio Anterior  I=% Descuento  J=Costo  K=Ganancia $  L=Ganancia %  M=Stock
-  const moneyCols = ["G", "H", "J", "K"];
-  const pctCols = ["I", "L"];
-  const numCols = ["M"];
-  for (let r = 2; r <= aoa.length; r++) {
-    moneyCols.forEach((col) => {
-      const cell = ws[`${col}${r}`];
-      if (cell && typeof cell.v === "number") { cell.t = "n"; cell.z = '"$"#,##0'; }
-    });
-    pctCols.forEach((col) => {
-      const cell = ws[`${col}${r}`];
-      if (cell && typeof cell.v === "number") { cell.t = "n"; cell.z = '0"%"'; }
-    });
-    numCols.forEach((col) => {
-      const cell = ws[`${col}${r}`];
-      if (cell && typeof cell.v === "number") { cell.t = "n"; }
-    });
-  }
+  // ═══════ HOJA 2: RESUMEN ═══════
+  const wsResumen = wb.addWorksheet("RESUMEN");
+  wsResumen.columns = [{ width: 28 }, { width: 18 }, { width: 22 }, { width: 18 }];
 
-  // Anchos de columna optimizados (21 columnas)
-  ws["!cols"] = [
-    { wch: 8 },   // ID
-    { wch: 10 },  // Genero
-    { wch: 14 },  // Categoria
-    { wch: 42 },  // Nombre del Producto
-    { wch: 24 },  // Colores
-    { wch: 22 },  // Talles
-    { wch: 14 },  // Precio
-    { wch: 16 },  // Precio Anterior
-    { wch: 12 },  // % Descuento
-    { wch: 14 },  // Costo
-    { wch: 14 },  // Ganancia $
-    { wch: 14 },  // Ganancia %
-    { wch: 8 },   // Stock
-    { wch: 14 },  // Alerta Stock
-    { wch: 50 },  // Imagen Principal (URL)
-    { wch: 36 },  // Notas
-    { wch: 18 },  // Creado
-    { wch: 18 },  // Ultimo Cambio
-    { wch: 8 },   // Activo
-    { wch: 11 },  // Destacado
-    { wch: 26 },  // ID Firestore
+  // Título
+  wsResumen.mergeCells("A1:D1");
+  const tR = wsResumen.getCell("A1");
+  tR.value = "SPORT17 — Resumen del Catálogo";
+  tR.font = { name: "Arial", size: 14, bold: true, color: { argb: "FFFFFFFF" } };
+  tR.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1A1A2E" } };
+  tR.alignment = { horizontal: "center", vertical: "middle" };
+  wsResumen.getRow(1).height = 30;
+
+  // Métricas generales
+  const sectionStyle = (cell) => {
+    cell.font = { name: "Arial", size: 11, bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF16213E" } };
+    cell.alignment = { horizontal: "left", vertical: "middle", indent: 1 };
+  };
+  wsResumen.mergeCells("A2:D2");
+  sectionStyle(wsResumen.getCell("A2"));
+  wsResumen.getCell("A2").value = "MÉTRICAS GENERALES";
+  wsResumen.getRow(2).height = 24;
+
+  const lastDataRow = Math.max(lastRow, 200); // rango dinámico hasta fila 200
+  const metricas = [
+    ["Total de Productos",       `COUNTA(CATALOGO!D3:D${lastDataRow})`],
+    ["Productos sin Precio",     `COUNTBLANK(CATALOGO!F3:F${lastRow})`],
+    ["Precio Promedio ($)",      `IFERROR(AVERAGEIF(CATALOGO!F3:F${lastDataRow},"<>"),"-")`],
+    ["Productos Hombre",         `COUNTIF(CATALOGO!B3:B${lastDataRow},"Hombre")`],
+    ["Productos Mujer",          `COUNTIF(CATALOGO!B3:B${lastDataRow},"Mujer")`],
+    ["Stock Total",              `SUM(CATALOGO!K3:K${lastDataRow})`],
+    ["Productos AGOTADOS",       `COUNTIF(CATALOGO!L3:L${lastDataRow},"AGOTADO")`],
+    ["Productos con stock BAJO", `COUNTIF(CATALOGO!L3:L${lastDataRow},"BAJO")`],
   ];
+  metricas.forEach((m, idx) => {
+    const r = idx + 3;
+    wsResumen.getCell(`A${r}`).value = m[0];
+    wsResumen.getCell(`A${r}`).font = { name: "Arial", size: 10 };
+    wsResumen.getCell(`B${r}`).value = { formula: m[1] };
+    wsResumen.getCell(`B${r}`).alignment = { horizontal: "right" };
+    if (m[0].includes("Promedio") || m[0].includes("Precio")) {
+      wsResumen.getCell(`B${r}`).numFmt = '"$"#,##0';
+    }
+  });
 
-  // Freeze pane: primera fila siempre visible al scrollear
-  ws["!freeze"] = { xSplit: 0, ySplit: 1, topLeftCell: "A2", activePane: "bottomLeft", state: "frozen" };
-  // Para xlsx, la propiedad oficial es "!freeze" o sheetView; usamos el método actual:
-  if (!ws["!views"]) ws["!views"] = [];
-  ws["!views"][0] = { state: "frozen", ySplit: 1 };
+  // Desglose por categoría
+  const desRow = metricas.length + 4; // gap
+  wsResumen.mergeCells(`A${desRow}:D${desRow}`);
+  sectionStyle(wsResumen.getCell(`A${desRow}`));
+  wsResumen.getCell(`A${desRow}`).value = "DESGLOSE POR CATEGORÍA";
+  wsResumen.getRow(desRow).height = 24;
 
-  // Autofiltro en toda la cabecera (Excel agrega los dropdowns automáticamente)
-  ws["!autofilter"] = { ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}1` };
+  const desHeaderRow = desRow + 1;
+  ["Categoría", "Cantidad", "Precio Promedio", "Stock Total"].forEach((h, i) => {
+    const c = wsResumen.getCell(desHeaderRow, i + 1);
+    c.value = h;
+    c.font = { name: "Arial", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
+    c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF374151" } };
+    c.alignment = { horizontal: "center", vertical: "middle" };
+  });
 
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "CATALOGO");
+  const cats = ["Zapatilla", "Campera", "Conjunto", "Pantalon", "Camiseta", "Perfume", "Buzo", "Sweater"];
+  cats.forEach((catName, idx) => {
+    const r = desHeaderRow + 1 + idx;
+    wsResumen.getCell(`A${r}`).value = catName;
+    wsResumen.getCell(`B${r}`).value = { formula: `COUNTIF(CATALOGO!C3:C${lastDataRow},"${catName}")` };
+    wsResumen.getCell(`C${r}`).value = { formula: `IFERROR(AVERAGEIFS(CATALOGO!F3:F${lastDataRow},CATALOGO!C3:C${lastDataRow},"${catName}",CATALOGO!F3:F${lastDataRow},"<>"),"-")` };
+    wsResumen.getCell(`C${r}`).numFmt = '"$"#,##0';
+    wsResumen.getCell(`D${r}`).value = { formula: `SUMIFS(CATALOGO!K3:K${lastDataRow},CATALOGO!C3:C${lastDataRow},"${catName}")` };
+    wsResumen.getCell(`B${r}`).alignment = { horizontal: "right" };
+    wsResumen.getCell(`D${r}`).alignment = { horizontal: "right" };
+  });
 
-  // Hoja de "Ayuda" con descripción de cada columna y los valores válidos
-  const helpRows = [
-    ["Columna", "Qué es", "Valores válidos", "Editable en import"],
-    ["ID", "Código corto del producto (ej: P001)", "Texto libre. Si está vacío en un import nuevo, se autogenera.", "Sí"],
-    ["Genero", "Sección padre", "Hombre | Mujer", "Sí"],
-    ["Categoria", "Categoría del producto", "Camiseta, Campera, Conjunto, Pantalon, Zapatilla, Perfume, Buzo", "Sí"],
-    ["Nombre del Producto", "Nombre comercial", "Texto libre", "Sí"],
-    ["Colores", "Colores disponibles separados por coma", 'Ej: "Negro,Blanco,Rojo"', "Sí"],
-    ["Talles Disponibles", "Talles separados por coma", 'Ej: "S,M,L,XL" o "40,41,42"', "Sí"],
-    ["Precio ($)", "Precio de venta en pesos", "Número entero (ej: 45000)", "Sí"],
-    ["Precio Anterior ($)", "Precio antes de la oferta. Se muestra tachado en la web.", "Número entero. Vacío si no hay oferta.", "Sí"],
-    ["% Descuento", "Calculado automáticamente si hay Precio Anterior", "Calculado: (1 − Precio/Precio Anterior) × 100", "No"],
-    ["Costo ($)", "Costo interno (no se muestra al público)", "Número entero (vacío si no se quiere registrar)", "Sí"],
-    ["Ganancia ($)", "Calculado automáticamente: Precio − Costo", "Calculado", "No"],
-    ["Ganancia (%)", "Calculado automáticamente: (Precio − Costo) / Costo × 100", "Calculado", "No"],
-    ["Stock", "Unidades disponibles", "Número entero", "Sí"],
-    ["Alerta Stock", "Calculado automáticamente", "OK (>3) | BAJO (1-3) | AGOTADO (0)", "No"],
-    ["Imagen Principal", "URL de la imagen principal", "URL (Firebase Storage o ruta relativa)", "No editar manualmente. Subir desde el panel."],
-    ["Notas", "Descripción interna del producto", "Texto libre", "Sí"],
-    ["Creado", "Fecha de creación del producto", "DD/MM/YYYY HH:mm", "No"],
-    ["Ultimo Cambio", "Última vez que se modificó", "DD/MM/YYYY HH:mm", "No"],
-    ["Activo", "Si se muestra en la tienda pública", "Si | No", "Sí"],
-    ["Destacado", "Si aparece en la sección Destacados del home", "Si | No", "Sí"],
-    ["ID Firestore", "ID interno (no tocar)", "Auto", "No — si lo borrás se crea un producto nuevo en el import"],
-  ];
-  const wsHelp = XLSX.utils.aoa_to_sheet(helpRows);
-  wsHelp["!cols"] = [{ wch: 22 }, { wch: 48 }, { wch: 42 }, { wch: 18 }];
-  wsHelp["!views"] = [{ state: "frozen", ySplit: 1 }];
-  XLSX.utils.book_append_sheet(wb, wsHelp, "AYUDA");
+  // ═══════ HOJA 3: GUIA DE USO ═══════
+  const wsGuia = wb.addWorksheet("GUIA DE USO");
+  wsGuia.columns = [{ width: 4 }, { width: 22 }, { width: 70 }];
 
+  // Título
+  wsGuia.mergeCells("B1:C1");
+  const tG = wsGuia.getCell("B1");
+  tG.value = "SPORT17 — Guía de Uso del Catálogo";
+  tG.font = { name: "Arial", size: 14, bold: true, color: { argb: "FFFFFFFF" } };
+  tG.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1A1A2E" } };
+  tG.alignment = { horizontal: "center", vertical: "middle" };
+  wsGuia.getRow(1).height = 30;
+
+  const section = (rowNum, title) => {
+    wsGuia.mergeCells(`B${rowNum}:C${rowNum}`);
+    const c = wsGuia.getCell(`B${rowNum}`);
+    c.value = title;
+    c.font = { name: "Arial", size: 11, bold: true, color: { argb: "FFFFFFFF" } };
+    c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF16213E" } };
+    c.alignment = { horizontal: "left", vertical: "middle", indent: 1 };
+    wsGuia.getRow(rowNum).height = 22;
+  };
+  const item = (rowNum, label, desc) => {
+    const b = wsGuia.getCell(`B${rowNum}`);
+    const c = wsGuia.getCell(`C${rowNum}`);
+    b.value = label;
+    b.font = { name: "Arial", size: 10, bold: true };
+    b.alignment = { vertical: "top", indent: 1 };
+    c.value = desc;
+    c.font = { name: "Arial", size: 10 };
+    c.alignment = { vertical: "top", wrapText: true };
+    wsGuia.getRow(rowNum).height = 22;
+  };
+
+  section(3, "1. COLUMNAS DEL CATÁLOGO");
+  item(4, "ID", "Código único del producto (P001, P002...). No modificar.");
+  item(5, "Genero", "Hombre o Mujer.");
+  item(6, "Categoria", "Tipo de producto (Zapatilla, Campera, Conjunto, Pantalon, Camiseta, Perfume, Buzo, Sweater).");
+  item(7, "Nombre del Producto", "Nombre completo del artículo tal como aparece en la web.");
+  item(8, "Precio Anterior ($)", "Precio antes de la oferta. Si se completa, en la web aparece tachado y se muestra un badge de descuento.");
+  item(9, "Precio ($)", "Precio de venta al público (lo que efectivamente paga el cliente).");
+  item(10, "Costo ($)", "Precio al que comprás el producto. Solo para uso interno, no se muestra en la web.");
+  item(11, "Ganancia ($)", "Se calcula automáticamente: Precio − Costo. No modificar.");
+  item(12, "Ganancia (%)", "Se calcula automáticamente: Ganancia / Costo. No modificar.");
+  item(13, "Talles Disponibles", "Talles separados por coma. Ej: \"S,M,L,XL\" o \"40,41,42\".");
+  item(14, "Stock", "Cantidad de unidades disponibles. Actualizar manualmente.");
+  item(15, "Alerta Stock", "Automático: BAJO si quedan 3 o menos, AGOTADO si stock = 0.");
+  item(16, "Notas", "Observaciones libres: proveedor, color, variante, link de proveedor, etc.");
+
+  section(18, "2. ACTUALIZAR UN PRECIO");
+  item(19, "Paso 1", "Ir a la hoja CATALOGO.");
+  item(20, "Paso 2", "Buscar el producto con Ctrl+F o usando el filtro en la columna Categoría.");
+  item(21, "Paso 3", "Hacer clic en la celda de Precio ($) y escribir el nuevo precio de venta.");
+  item(22, "Paso 4", "Guardar y subir el archivo desde el admin (Importar / Exportar).");
+
+  section(24, "3. ACTUALIZAR STOCK");
+  item(25, "Paso 1", "Ir a la columna Stock (K) del producto correspondiente.");
+  item(26, "Paso 2", "Escribir la cantidad actual de unidades disponibles.");
+  item(27, "Nota", "Si el stock llega a 0, la columna Alerta Stock muestra AGOTADO automáticamente.");
+
+  section(29, "4. PROMOCIONES Y OFERTAS");
+  item(30, "Paso 1", "Para marcar un producto en oferta, completar Precio Anterior ($) con el precio sin descuento.");
+  item(31, "Paso 2", "El badge -X% aparece automáticamente en la web calculado sobre el Precio actual.");
+
+  section(33, "5. HOJA RESUMEN");
+  item(34, "Métricas", "Muestra automáticamente: total de productos, sin precio, precio promedio, cantidad por género, stock total, agotados y bajo stock.");
+  item(35, "Desglose", "Cantidad, precio promedio y stock total por categoría. Se actualiza solo al editar el catálogo.");
+
+  section(37, "6. SUBIR CAMBIOS A LA WEB");
+  item(38, "Importar", "Desde el admin > Importar/Exportar, subí este archivo y se actualizan los productos automáticamente (precios, stock, descripción, talles).");
+  item(39, "Historial", "Cada importación queda registrada, se puede deshacer desde el admin si algo sale mal.");
+
+  // ═══════ DESCARGAR ═══════
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
   const stamp = new Date().toISOString().slice(0, 10);
-  const filename = `sport17_catalogo_${stamp}.${format}`;
-  XLSX.writeFile(wb, filename, { bookType: format });
-  toast(`Catálogo descargado (${sortedProducts.length} productos)`);
+  a.href = url;
+  a.download = `catalogo_sport17_${stamp}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ─────────────────────────── EXPORT CSV (simple) ───────────────────────────
+function exportFileCsv(sortedProducts, catById, sectionNameBySlug) {
+  const headers = ["ID","Genero","Categoria","Nombre del Producto","Precio Anterior ($)","Precio ($)","Costo ($)","Ganancia ($)","Ganancia (%)","Talles Disponibles","Stock","Alerta Stock","Notas"];
+  const rows = sortedProducts.map((p, i) => {
+    const cat = catById(p.categoryId);
+    const genero = resolveGeneroLabel(cat?.parent, sectionNameBySlug);
+    const precio = normalizePriceValue(p.price);
+    const precioOld = normalizePriceValue(p.priceOld);
+    const costo = normalizePriceValue(p.cost);
+    const ganancia = costo > 0 && precio > 0 ? precio - costo : "";
+    const gananciaPct = costo > 0 && precio > 0 ? ((precio - costo) / costo).toFixed(3) : "";
+    const stock = p.stock ?? "";
+    const alerta = stock === "" ? "Sin dato" : stock <= 0 ? "AGOTADO" : stock <= 3 ? "BAJO" : "OK";
+    return [
+      generateExportId(p, i), genero, categoryToSingular(cat?.name), p.name || "",
+      precioOld || "", precio || "", costo || "", ganancia, gananciaPct,
+      (p.sizes || []).join(","), stock, alerta, p.description || "",
+    ];
+  });
+  const csv = [headers, ...rows]
+    .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
+    .join("\n");
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = new Date().toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `catalogo_sport17_${stamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast("Catálogo CSV descargado");
 }

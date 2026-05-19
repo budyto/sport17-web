@@ -19,6 +19,7 @@ import {
 
 const PRODUCTS = "products";
 const CATEGORIES = "categories";
+const SECTIONS = "sections";
 
 // ═══════ Productos ═══════
 
@@ -140,6 +141,107 @@ export async function reorderCategories(ordered) {
   const batch = writeBatch(db);
   ordered.forEach((id, idx) => batch.update(doc(db, CATEGORIES, id), { order: idx }));
   await batch.commit();
+}
+
+// ═══════ Secciones (nivel padre de las categorías) ═══════
+// Un doc por sección. El doc id ES el slug (hombres, mujeres, tecnologia...)
+// para que las categorías puedan referenciarlo por nombre legible.
+
+export const EMPTY_SECTION = {
+  name: "",
+  description: "",
+  coverImage: null,  // { url, path }
+  active: true,
+  order: 0,
+};
+
+export async function fetchSections() {
+  try {
+    const q = query(collection(db, SECTIONS), orderBy("order", "asc"));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  } catch (err) {
+    // Las reglas todavía pueden no estar deployadas en producción.
+    // Devolvemos [] para que el resto de la app pueda funcionar.
+    console.warn("fetchSections falló (probablemente faltan reglas en Firestore):", err.message);
+    return [];
+  }
+}
+
+export async function fetchSection(id) {
+  const snap = await getDoc(doc(db, SECTIONS, id));
+  return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+}
+
+// Setea (crea o sobreescribe) con un slug específico. Esto permite que el
+// admin elija el slug a la hora de crear la sección (y queda como doc id).
+export async function setSectionWithId(id, data) {
+  const payload = {
+    ...EMPTY_SECTION,
+    ...data,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+  await setDoc(doc(db, SECTIONS, id), payload);
+  return id;
+}
+
+export async function updateSection(id, data) {
+  await updateDoc(doc(db, SECTIONS, id), { ...data, updatedAt: serverTimestamp() });
+}
+
+export async function deleteSectionDoc(id) {
+  await deleteDoc(doc(db, SECTIONS, id));
+}
+
+export async function reorderSections(ordered) {
+  const batch = writeBatch(db);
+  ordered.forEach((id, idx) => batch.update(doc(db, SECTIONS, id), { order: idx }));
+  await batch.commit();
+}
+
+// Asegura que existan las secciones base (hombres y mujeres). Se llama una
+// vez al cargar el admin si todavía no hay secciones. Esto migra el estado
+// "hardcoded" anterior a la nueva colección sin romper retrocompatibilidad.
+// Defensive: si las reglas de Firestore aún no permiten leer/escribir
+// `sections` (ej: aún no se hizo `firebase deploy --only firestore:rules`),
+// no rompemos la app. La home igual cae a defaults hardcodeados.
+export async function ensureDefaultSections() {
+  try {
+    const snap = await getDocs(collection(db, SECTIONS));
+    if (!snap.empty) return false; // ya hay secciones
+    const batch = writeBatch(db);
+    // Usamos rutas absolutas para que las imágenes se resuelvan igual desde
+    // la home (/) y desde el admin (/admin/). Si fueran relativas (./men.webp)
+    // desde el admin se buscarían en /admin/men.webp y darían 404.
+    batch.set(doc(db, SECTIONS, "hombres"), {
+      name: "Hombres",
+      description: "Conjuntos · Camperas · Zapatillas · Perfumes",
+      coverImage: { url: "/men.webp", path: null },
+      active: true,
+      order: 0,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(doc(db, SECTIONS, "mujeres"), {
+      name: "Mujeres",
+      description: "Conjuntos · Camperas · Buzos · Perfumes",
+      coverImage: { url: "/women.webp", path: null },
+      active: true,
+      order: 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    await batch.commit();
+    return true;
+  } catch (err) {
+    console.warn(
+      "ensureDefaultSections falló. Probablemente faltan reglas de Firestore deployadas. " +
+      "Ejecutá: firebase deploy --only firestore:rules — Detalle:",
+      err.message
+    );
+    return false;
+  }
 }
 
 // ═══════ Historial de imports (para deshacer) ═══════

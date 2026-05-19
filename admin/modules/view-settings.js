@@ -1,6 +1,6 @@
 // ─── Vista: Configuración + seed inicial ─────────────────────────────────────
 
-import { db, doc, getDoc, setDoc, serverTimestamp, writeBatch, collection, getDocs } from "../firebase-init.js";
+import { db, doc, getDoc, setDoc, serverTimestamp, writeBatch, collection, getDocs, deleteDoc, query, orderBy } from "../firebase-init.js";
 import { STORE } from "./helpers.js";
 import { $ } from "./helpers.js";
 import { toast, confirmDialog } from "./ui.js";
@@ -78,6 +78,21 @@ export async function renderSettings(outlet) {
       <div id="cleanup-report" style="margin-top:16px;"></div>
     </div>
 
+    <div class="card" style="max-width: 720px; margin-top: 24px;">
+      <div class="card-head">
+        <h2>Suscriptores al newsletter</h2>
+      </div>
+      <p style="color: var(--text-soft); margin-bottom: 14px;">
+        Emails capturados desde el footer de la home. Exportá la lista para usarla
+        en tu herramienta de email marketing.
+      </p>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button class="btn btn-secondary" id="newsletter-refresh-btn">Ver lista</button>
+        <button class="btn btn-secondary" id="newsletter-export-btn">Descargar CSV</button>
+      </div>
+      <div id="newsletter-list" style="margin-top:16px;"></div>
+    </div>
+
     <div class="card" style="max-width: 720px; margin-top: 24px; border: 1px solid rgba(220,38,38,0.3);">
       <div class="card-head"><h2>Acciones destructivas</h2></div>
       <p style="color: var(--text-soft); margin-bottom: 14px;">
@@ -129,6 +144,101 @@ export async function renderSettings(outlet) {
 
   $("#cleanup-scan-btn").onclick = () => runCleanupScan();
   $("#delete-no-image-btn").onclick = () => deleteNoImageProducts();
+  $("#newsletter-refresh-btn").onclick = () => loadNewsletterList();
+  $("#newsletter-export-btn").onclick = () => exportNewsletterCsv();
+}
+
+// ═══════════════ NEWSLETTER ═══════════════
+async function fetchNewsletter() {
+  const q = query(collection(db, "newsletter"), orderBy("createdAt", "desc"));
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+async function loadNewsletterList() {
+  const list = $("#newsletter-list");
+  list.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const items = await fetchNewsletter();
+    if (items.length === 0) {
+      list.innerHTML = `<p style="color:var(--text-mute); font-size:13px;">Todavía no hay suscriptores.</p>`;
+      return;
+    }
+    const rows = items.map((it) => {
+      const date = it.createdAt?.toDate ? it.createdAt.toDate() : null;
+      const dateStr = date
+        ? `${String(date.getDate()).padStart(2, "0")}/${String(date.getMonth() + 1).padStart(2, "0")}/${date.getFullYear()}`
+        : "—";
+      return `<tr>
+        <td><a href="mailto:${escapeForHtml(it.email)}" style="color:var(--primary);">${escapeForHtml(it.email)}</a></td>
+        <td><span style="font-size:12px; color:var(--text-mute);">${escapeForHtml(it.source || "—")}</span></td>
+        <td>${dateStr}</td>
+        <td><button class="btn btn-ghost btn-sm" data-newsletter-drop="${it.id}" style="color:var(--danger);">×</button></td>
+      </tr>`;
+    }).join("");
+    list.innerHTML = `
+      <p style="color:var(--text-soft); font-size:13px; margin: 0 0 8px;">${items.length} suscriptor${items.length === 1 ? "" : "es"}</p>
+      <div class="table-wrap" style="max-height: 400px; overflow:auto;">
+        <table class="table">
+          <thead>
+            <tr><th>Email</th><th>Origen</th><th>Fecha</th><th></th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+    list.querySelectorAll("[data-newsletter-drop]").forEach((btn) => {
+      btn.onclick = async () => {
+        const ok = await confirmDialog({
+          title: "Borrar suscriptor",
+          message: "¿Eliminar este email de la lista?",
+          confirmText: "Borrar",
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await deleteDoc(doc(db, "newsletter", btn.dataset.newsletterDrop));
+          loadNewsletterList();
+          toast("Suscriptor eliminado");
+        } catch (err) {
+          toast("Error: " + err.message, "error");
+        }
+      };
+    });
+  } catch (err) {
+    list.innerHTML = `<p style="color:#ef4444; font-size:13px;">Error: ${escapeForHtml(err.message)}</p>`;
+  }
+}
+
+async function exportNewsletterCsv() {
+  try {
+    const items = await fetchNewsletter();
+    if (items.length === 0) {
+      toast("Todavía no hay suscriptores", "info");
+      return;
+    }
+    const header = ["Email", "Origen", "Fecha de alta"];
+    const rows = items.map((it) => {
+      const date = it.createdAt?.toDate ? it.createdAt.toDate() : null;
+      const dateStr = date ? date.toISOString() : "";
+      return [it.email || "", it.source || "", dateStr];
+    });
+    const csv = [header, ...rows]
+      .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sport17_newsletter_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast(`${items.length} suscriptores exportados`);
+  } catch (err) {
+    toast("Error al exportar: " + err.message, "error");
+  }
 }
 
 // Borra todos los productos cuyo array images esté vacío.
