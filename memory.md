@@ -24,6 +24,163 @@ desde Instagram y WhatsApp.
 
 ---
 
+## Sesion 2026-05-18 — Secciones dinamicas, dashboard Tiendanube, UX
+
+### Arquitectural: secciones dinamicas
+Antes las secciones padre estaban hardcoded ("hombres" / "mujeres") en HTML
+y JS. Ahora hay una coleccion `sections/{slug}` en Firestore con CRUD
+completo desde el admin. Permite agregar Tecnologia, Hogar, lo que sea.
+
+- `data.js`: `EMPTY_SECTION`, `fetchSections`, `setSectionWithId`,
+  `updateSection`, `deleteSectionDoc`, `reorderSections`,
+  `ensureDefaultSections` (migracion automatica de hombres/mujeres)
+- `view-sections.js` (nuevo): vista admin con lista, drag-to-reorder,
+  modal de editor con auto-slugify, upload de portada, validacion de
+  duplicados (slug y nombre)
+- `view-categories.js`: el selector "Seccion padre" ahora carga las
+  secciones reales de Firestore + valida duplicados por nombre+parent
+- `view-import.js`: el campo "Genero" del Excel resuelve a cualquier
+  seccion (slug, nombre, prefijo, legacy "Hombre"/"Mujer")
+- `firestore.rules`: regla para sections (read publico, write admin)
+- Sidebar admin: nuevo item "Secciones" entre Productos y Categorias
+
+### Home publica dinamica
+- `main.js`: `loadSections()` + `renderSectionsUI()` arman desde JS el
+  grid de seleccion, el menu del header y el footer
+- Secciones sin productos se ocultan automaticamente de la home
+- Mega-menu: hover sobre cada seccion del header dropdownea con sus
+  categorias clickeables (en mobile las muestra indentadas)
+- Footer reestructurado: 1 columna por seccion con sus categorias
+  (link scrollea al grupo correspondiente en el catalogo)
+
+### Dashboard estilo Tiendanube
+Reescrito completo. Ya no es solo "X productos totales":
+
+- **KPI cards grandes** (con icono y color):
+  - Valor del inventario = sum(precio * stock)
+  - Precio promedio
+  - Ganancia potencial = sum((precio-costo)*stock), o valor catalogo
+  - Suscriptores del newsletter
+- **Stats secundarias**: totales, secciones, sin stock, bajo stock,
+  destacados, stock total
+- **Distribucion por seccion** (barras horizontales):
+  - Productos por seccion
+  - Stock por seccion
+  - Valor del inventario por seccion (formato moneda)
+- **Top categorias** por cantidad de productos
+- **Top productos** en 4 cards: mas caros, mas stock, stock bajo,
+  destacados (cada uno con thumbnail y link al editor)
+- **Alertas accionables** (renovadas): click abre modal con
+  hero icon coloreado por tipo, 3 stats card, tabla completa con
+  badges color-coded incluyendo "ULTIMO!"
+
+### Form de productos: pickers visuales
+- Talles como botones agrupados:
+  - Ropa (XS, S, M, L, XL, XXL, XXXL)
+  - Calzado (36 a 46)
+  - Otros (Unico, Talle 1-4)
+  - + input custom abajo
+- Colores como swatches con dot del color real:
+  - Paleta de 15 colores comunes con su hex
+  - Agregar custom con name + `<input type="color">`
+- Estado interno sigue siendo `string[]` (back-compat con BD)
+
+### UX comercial pulido
+- Badge `ULTIMO!` rojo con pulso fuerte cuando stock = 1
+- Badge `Quedan X!` naranja para stock 2-3
+- Productos ordenados por stock ascendente:
+  menos stock primero (urgencia), sin stock al final
+- Avatares de testimonios:
+  - Cada uno con gradiente unico (M=naranja, J=azul, L=verde,
+    S=rosa, N=violeta, C=cian)
+  - Fix: `display: inline-flex` + `line-height:1` para centrar bien
+    la letra en el circulo (grid no funcionaba en todos los browsers)
+
+### Bugs criticos resueltos
+- **Editor de seccion abria modal de "Nueva categoria"**: collisi'on
+  de event listeners. `view-categories.js` deja un listener en el
+  outlet del admin que persiste al navegar. Fix doble:
+  1. Renombrar `data-edit`/`data-delete` a `data-section-edit/delete`
+     en view-sections.js
+  2. `admin.js` ahora clona el outlet en cada navegacion, descartando
+     todos los listeners viejos
+- **Skeleton infinito en secciones sin productos**: `setActiveCollection`
+  mostraba skeleton para siempre. Fix: flag `productsLoaded` global
+- **Portadas rotas en secciones default**: `ensureDefaultSections`
+  guardaba `./men.webp` que desde `/admin/` se resuelve a
+  `/admin/men.webp` (404). Fix: ruta absoluta `/men.webp`
+- **Footer duplicaba links**: `renderSectionsUI` se llama 2 veces en
+  el boot. Fix: limpiar nodos previos antes de poblar (idempotente)
+- **Sintaxis error en view-import.js**: llave extra a fin de
+  historyRow. Eliminada
+- **Tonos del fondo "vibrando"** al escribir en la lupa del header:
+  saco box-shadow pulsante; header pasa a 94% opacidad al focus
+
+### Mejoras al Excel del cliente
+Reescritura completa del exportFile con ExcelJS:
+- Carga dinamica del CDN solo cuando el cliente exporta (~600KB)
+- Replica EXACTAMENTE el formato del Sheets maestro del cliente:
+  - 13 columnas (ID, Genero, Categoria, Nombre, Precio Anterior,
+    Precio, Costo, Ganancia $, Ganancia %, Talles, Stock, Alerta,
+    Notas)
+  - Titulo mergeado A1:M1 con fondo #1A1A2E
+  - Header fila 2 con fondo #16213E
+  - Freeze A3 + autofilter
+  - Formulas reales en Ganancia $ ($-precio-costo), Ganancia %
+    (ganancia/costo) y Alerta Stock (IF stock=0 AGOTADO etc.)
+  - Formato moneda y porcentaje
+  - Precio (F) con texto azul sobre gris claro
+  - Filas zebra para legibilidad
+- 3 hojas: CATALOGO, RESUMEN (con COUNTIF/AVERAGEIFS/SUMIFS),
+  GUIA DE USO
+
+### Acciones del admin > Configuracion
+- "Limpiar catalogo": detecta duplicados + precios <1000, muestra
+  resumen, aplica en lotes seguros de 400 docs
+- "Borrar productos sin imagen" (destructiva, doble confirm)
+- "Suscriptores del newsletter" con export a CSV
+- Banner promocional editable
+- WhatsApp, umbral de bajo stock, ocultar sin stock
+
+### Quick wins comerciales
+- WhatsApp pre-armado por producto (nombre, precio, talles, colores)
+- Badge `-X%` calculado si hay priceOld > price
+- Badge `NUEVO` si createdAt < 14 dias
+- Lupa en el header (estilo Tiendanube/MG): input desktop / overlay
+  mobile expandible
+- Testimonios en home (6 hardcoded, editables despues desde admin)
+- Newsletter en el footer con captura de leads
+- Boton flotante de WhatsApp con tooltip y pulso
+- Boton "volver arriba" tras 600px de scroll
+- Compartir producto (Web Share API + fallback portapapeles)
+- Skeleton loading durante carga inicial
+- Auto-play del hero (5.5s, pausa al hover/focus/tab inactivo)
+
+### Bug critico de seguridad resuelto
+Form de login admin sin `method`/`action` enviaba la contrasena en la
+URL como query param si el JS aun no se habia bindeado (race condition
+en modulos ES).
+Fix:
+- `method="post" action="javascript:void(0)"` en el form
+- Script inline en `<head>` que borra params sensibles del historial
+  antes de cualquier modulo ES (defense in depth)
+- Link "Olvidaste tu contrasena?" con `sendPasswordResetEmail`
+
+### SEO / PWA / Performance
+- `robots.txt`, `sitemap.xml` (con imagenes), `manifest.webmanifest`
+- Favicon + apple-touch-icon
+- Preload del hero.webp (LCP) + preconnect a Firebase
+- Headers de seguridad: X-Content-Type-Options, Referrer-Policy,
+  X-Frame-Options, Permissions-Policy
+- Content-Type explicito para manifest/sitemap/robots
+
+### Deploy
+- Firebase Hosting: `sport17-a01f6.web.app` (200 OK)
+- Firebase rules: deployadas (sections + newsletter)
+- GitHub: `origin/main` actualizado (commit df40d0d)
+
+---
+
 ## Sesion 2026-05-15 — Mejoras integrales y bugs criticos
 
 ### 1. WhatsApp FAB flotante
